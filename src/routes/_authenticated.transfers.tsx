@@ -1,3 +1,4 @@
+import { QueryState } from "@/components/query-state";
 import { createFileRoute, Navigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -54,7 +55,6 @@ interface Movement {
 
 function TransfersPage() {
   const isOwner = useIsOwner();
-  if (!isOwner) return <Navigate to="/dashboard" replace />;
 
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
@@ -70,7 +70,11 @@ function TransfersPage() {
   const { data: branches = [] } = useQuery({
     queryKey: ["branches-active"],
     queryFn: async () => {
-      const { data, error } = await supabase.from("branches").select("id, name").eq("status", true).order("name");
+      const { data, error } = await supabase
+        .from("branches")
+        .select("id, name, code")
+        .eq("status", true)
+        .order("name");
       if (error) throw error;
       return data ?? [];
     },
@@ -79,7 +83,11 @@ function TransfersPage() {
   const { data: products = [] } = useQuery({
     queryKey: ["products-active"],
     queryFn: async () => {
-      const { data, error } = await supabase.from("products").select("id, name, unit").eq("status", true).order("name");
+      const { data, error } = await supabase
+        .from("products")
+        .select("id, name, unit")
+        .eq("status", true)
+        .order("name");
       if (error) throw error;
       return data ?? [];
     },
@@ -102,7 +110,12 @@ function TransfersPage() {
   });
 
   // Recent transfers (movements with ref_type = 'transfer')
-  const { data: movements = [] } = useQuery({
+  const {
+    data: movements = [],
+    isPending: pagePending,
+    error: pageError,
+    refetch: retryPage,
+  } = useQuery({
     queryKey: ["transfer-movements"],
     staleTime: 60_000,
     queryFn: async () => {
@@ -115,11 +128,12 @@ function TransfersPage() {
         .order("created_at", { ascending: false })
         .limit(200);
       if (error) throw error;
+
       return (data ?? []) as Movement[];
     },
   });
 
-  const selectedProduct = products.find((p: any) => p.id === form.product_id);
+  const selectedProduct = products.find((p) => p.id === form.product_id);
   const availableQty = Number(sourceStock?.quantity ?? 0);
 
   const canSave = () => {
@@ -136,12 +150,12 @@ function TransfersPage() {
     mutationFn: async () => {
       const err = canSave();
       if (err) throw new Error(err);
-      const { error } = await (supabase.rpc as any)("transfer_stock", {
+      const { error } = await supabase.rpc("transfer_stock", {
         p_from_branch: form.from_branch,
         p_to_branch: form.to_branch,
         p_product_id: form.product_id,
         p_quantity: Number(form.quantity),
-        p_reason: form.reason || null,
+        p_reason: form.reason,
       });
       if (error) throw error;
     },
@@ -159,8 +173,8 @@ function TransfersPage() {
     },
   });
 
-  const fromBranches = branches.filter((b: any) => b.id !== form.to_branch);
-  const toBranches = branches.filter((b: any) => b.id !== form.from_branch);
+  const fromBranches = branches.filter((b) => b.id !== form.to_branch);
+  const toBranches = branches.filter((b) => b.id !== form.from_branch);
 
   const filteredMovements = movements.filter(
     (m) =>
@@ -172,6 +186,11 @@ function TransfersPage() {
     setForm({ from_branch: "", to_branch: "", product_id: "", quantity: "", reason: "" });
     setOpen(true);
   };
+
+  if (!isOwner) return <Navigate to="/dashboard" replace />;
+
+  if (pagePending || pageError)
+    return <QueryState pending={pagePending} error={pageError} retry={() => void retryPage()} />;
 
   return (
     <div className="space-y-6">
@@ -210,7 +229,7 @@ function TransfersPage() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {fromBranches.map((b: any) => (
+                    {fromBranches.map((b) => (
                       <SelectItem key={b.id} value={b.id}>
                         {b.name} {b.code ? `(${b.code})` : ""}
                       </SelectItem>
@@ -233,7 +252,7 @@ function TransfersPage() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {toBranches.map((b: any) => (
+                    {toBranches.map((b) => (
                       <SelectItem key={b.id} value={b.id}>
                         {b.name} {b.code ? `(${b.code})` : ""}
                       </SelectItem>
@@ -256,7 +275,7 @@ function TransfersPage() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {products.map((p: any) => (
+                    {products.map((p) => (
                       <SelectItem key={p.id} value={p.id}>
                         {p.name} ({p.unit})
                       </SelectItem>
@@ -367,11 +386,7 @@ function TransfersPage() {
             <CardTitle>Transfer activity ({numberFmt(movements.length)})</CardTitle>
             <div className="relative max-w-sm">
               <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                className="pl-9"
-              />
+              <Input value={search} onChange={(e) => setSearch(e.target.value)} className="pl-9" />
             </div>
           </div>
         </CardHeader>

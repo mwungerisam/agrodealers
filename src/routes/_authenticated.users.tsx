@@ -1,3 +1,4 @@
+import { QueryState } from "@/components/query-state";
 import { createFileRoute, Navigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -5,9 +6,29 @@ import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import {
   AlertDialog,
@@ -25,35 +46,59 @@ import { useAuth } from "@/lib/auth-context";
 import { isStrongPassword } from "@/lib/password-policy";
 import { Eye, EyeOff, Plus, Trash2 } from "lucide-react";
 
+type UserRow = {
+  id: string;
+  user_id: string;
+  role: "owner" | "manager";
+  branch_id: string | null;
+  is_primary_owner?: boolean;
+  profile?: { id: string; full_name: string; phone: string | null };
+};
+
 export const Route = createFileRoute("/_authenticated/users")({
   component: UsersPage,
 });
 
 function UsersPage() {
   const { role } = useAuth();
-  if (role && role.role !== "owner") return <Navigate to="/dashboard" replace />;
+  const canManageRoles = role?.is_primary_owner === true;
 
   const qc = useQueryClient();
-  const [removing, setRemoving] = useState<any | null>(null);
+  const [removing, setRemoving] = useState<UserRow | null>(null);
   const [adding, setAdding] = useState(false);
   const [showInitialPassword, setShowInitialPassword] = useState(false);
-  const [worker, setWorker] = useState({ fullName: "", email: "", phone: "", branchId: "", initialPassword: "" });
+  const [worker, setWorker] = useState({
+    fullName: "",
+    email: "",
+    phone: "",
+    branchId: "",
+    initialPassword: "",
+  });
   const passwordIsStrong = isStrongPassword(worker.initialPassword);
   const canCreateWorker = Boolean(
-    worker.fullName.trim()
-    && worker.email.trim()
-    && worker.branchId
-    && passwordIsStrong,
+    worker.fullName.trim() && worker.email.trim() && worker.branchId && passwordIsStrong,
   );
 
-  const { data: rows = [] } = useQuery({
+  const {
+    data: rows = [],
+    isPending: pagePending,
+    error: pageError,
+    refetch: retryPage,
+  } = useQuery({
     queryKey: ["user-roles-list"],
     queryFn: async () => {
-      const { data: roles = [] } = await supabase.from("user_roles").select("id, user_id, role, branch_id").order("created_at");
-      const { data: profiles = [] } = await supabase.from("profiles").select("id, full_name, phone");
+      const { data: roles = [], error: rolesError } = await supabase
+        .from("user_roles")
+        .select("id, user_id, role, branch_id, is_primary_owner")
+        .order("created_at");
+      if (rolesError) throw rolesError;
+      const { data: profiles = [], error: profilesError } = await supabase
+        .from("profiles")
+        .select("id, full_name, phone");
+      if (profilesError) throw profilesError;
 
       const roleMap = new Map((roles ?? []).map((r) => [r.user_id, r]));
-      const list: any[] = (roles ?? []).map((r) => ({
+      const list: UserRow[] = (roles ?? []).map((r) => ({
         ...r,
         profile: profiles?.find((p) => p.id === r.user_id),
       }));
@@ -84,7 +129,12 @@ function UsersPage() {
   });
 
   const updateRow = useMutation({
-    mutationFn: async (v: { id: string; user_id?: string; role: "owner" | "manager"; branch_id: string | null }) => {
+    mutationFn: async (v: {
+      id: string;
+      user_id?: string;
+      role: "owner" | "manager";
+      branch_id: string | null;
+    }) => {
       if (v.id.startsWith("new-") && v.user_id) {
         const { error } = await supabase.from("user_roles").insert({
           user_id: v.user_id,
@@ -109,7 +159,7 @@ function UsersPage() {
 
   const removeWorker = useMutation({
     mutationFn: async (userId: string) => {
-      const { error } = await (supabase.rpc as any)("delete_worker", { p_user_id: userId });
+      const { error } = await supabase.rpc("delete_worker", { p_user_id: userId });
       if (error) throw error;
     },
     onSuccess: () => {
@@ -132,10 +182,10 @@ function UsersPage() {
           if (typeof json === "function") {
             const payload = await (json as () => Promise<unknown>).call(context).catch(() => null);
             if (
-              payload
-              && typeof payload === "object"
-              && "error" in payload
-              && typeof payload.error === "string"
+              payload &&
+              typeof payload === "object" &&
+              "error" in payload &&
+              typeof payload.error === "string"
             ) {
               throw new Error(payload.error);
             }
@@ -159,20 +209,40 @@ function UsersPage() {
     onError: (error: Error) => toast.error(formatErrorMessage(error)),
   });
 
+  if (role && role.role !== "owner") return <Navigate to="/dashboard" replace />;
+
+  if (pagePending || pageError)
+    return <QueryState pending={pagePending} error={pageError} retry={() => void retryPage()} />;
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-        <h1 className="text-2xl font-extrabold tracking-tight sm:text-3xl">{t.users}</h1>
-        <p className="text-sm text-muted-foreground">{localized("Cunga abakoresha, inshingano zabo n'amashami bakoreramo.", "Manage users, their roles, and their branch assignments.")}</p>
+          <h1 className="text-2xl font-extrabold tracking-tight sm:text-3xl">{t.users}</h1>
+          <p className="text-sm text-muted-foreground">
+            {localized(
+              "Cunga abakoresha, inshingano zabo n'amashami bakoreramo.",
+              "Manage users, their roles, and their branch assignments.",
+            )}
+          </p>
         </div>
-        <Button onClick={() => setAdding(true)}><Plus className="mr-2 h-4 w-4" />{t.addWorker}</Button>
+        <Button onClick={() => setAdding(true)} disabled={!canManageRoles}>
+          <Plus className="mr-2 h-4 w-4" />
+          {t.addWorker}
+        </Button>
       </div>
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">{localized(`Abakoresha bose (${rows.length})`, `All users (${rows.length})`)}</CardTitle>
-          <p className="text-xs text-muted-foreground">{localized("Umuyobozi ni we ushyiraho konti z'abakozi kandi akabagenera uruhare n'ishami.", "The owner creates worker accounts and assigns their role and branch.")}</p>
+          <CardTitle className="text-base">
+            {localized(`Abakoresha bose (${rows.length})`, `All users (${rows.length})`)}
+          </CardTitle>
+          <p className="text-xs text-muted-foreground">
+            {localized(
+              "Umuyobozi ni we ushyiraho konti z'abakozi kandi akabagenera uruhare n'ishami.",
+              "The owner creates worker accounts and assigns their role and branch.",
+            )}
+          </p>
         </CardHeader>
         <CardContent>
           <Table>
@@ -187,15 +257,32 @@ function UsersPage() {
             </TableHeader>
             <TableBody>
               {rows.length === 0 ? (
-                <TableRow><TableCell colSpan={5} className="py-10 text-center text-muted-foreground">{t.noData}</TableCell></TableRow>
+                <TableRow>
+                  <TableCell colSpan={5} className="py-10 text-center text-muted-foreground">
+                    {t.noData}
+                  </TableCell>
+                </TableRow>
               ) : (
-                rows.map((r: any) => (
+                rows.map((r) => (
                   <TableRow key={r.id}>
                     <TableCell className="font-medium">{r.profile?.full_name || "—"}</TableCell>
                     <TableCell>{r.profile?.phone || "—"}</TableCell>
                     <TableCell>
-                      <Select value={r.role} onValueChange={(v) => updateRow.mutate({ id: r.id, role: v as any, branch_id: r.branch_id })}>
-                        <SelectTrigger className="w-40"><SelectValue /></SelectTrigger>
+                      <Select
+                        value={r.role}
+                        disabled={!canManageRoles || r.is_primary_owner || updateRow.isPending}
+                        onValueChange={(v) =>
+                          updateRow.mutate({
+                            id: r.id,
+                            user_id: r.user_id,
+                            role: v as UserRow["role"],
+                            branch_id: r.branch_id,
+                          })
+                        }
+                      >
+                        <SelectTrigger className="w-40">
+                          <SelectValue />
+                        </SelectTrigger>
                         <SelectContent>
                           <SelectItem value="owner">{t.owner}</SelectItem>
                           <SelectItem value="manager">{t.manager}</SelectItem>
@@ -205,19 +292,38 @@ function UsersPage() {
                     <TableCell>
                       <Select
                         value={r.branch_id ?? "none"}
-                        onValueChange={(v) => updateRow.mutate({ id: r.id, role: r.role, branch_id: v === "none" ? null : v })}
-                        disabled={r.role === "owner"}
+                        onValueChange={(v) =>
+                          updateRow.mutate({
+                            id: r.id,
+                            user_id: r.user_id,
+                            role: r.role,
+                            branch_id: v === "none" ? null : v,
+                          })
+                        }
+                        disabled={!canManageRoles || r.role === "owner" || updateRow.isPending}
                       >
-                        <SelectTrigger className="w-52"><SelectValue /></SelectTrigger>
+                        <SelectTrigger className="w-52">
+                          <SelectValue />
+                        </SelectTrigger>
                         <SelectContent>
                           <SelectItem value="none">—</SelectItem>
-                          {branches.map((b: any) => <SelectItem key={b.id} value={b.id}>{b.name}</SelectItem>)}
+                          {branches.map((b) => (
+                            <SelectItem key={b.id} value={b.id}>
+                              {b.name}
+                            </SelectItem>
+                          ))}
                         </SelectContent>
                       </Select>
                     </TableCell>
                     <TableCell className="text-right">
                       {r.role === "manager" && (
-                        <Button variant="ghost" size="icon" className="text-destructive hover:text-destructive" onClick={() => setRemoving(r)} aria-label={t.removeWorker}>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="text-destructive hover:text-destructive"
+                          onClick={() => setRemoving(r)}
+                          aria-label={t.removeWorker}
+                        >
                           <Trash2 className="h-4 w-4" />
                         </Button>
                       )}
@@ -229,12 +335,18 @@ function UsersPage() {
           </Table>
         </CardContent>
       </Card>
-      <Dialog open={adding} onOpenChange={(open) => {
-        setAdding(open);
-        if (!open) setShowInitialPassword(false);
-      }}>
+      <Dialog
+        open={adding}
+        onOpenChange={(open) => {
+          setAdding(open);
+          if (!open) setShowInitialPassword(false);
+        }}
+      >
         <DialogContent>
-          <DialogHeader><DialogTitle>{t.createWorker}</DialogTitle><DialogDescription>{t.workerCreationDesc}</DialogDescription></DialogHeader>
+          <DialogHeader>
+            <DialogTitle>{t.createWorker}</DialogTitle>
+            <DialogDescription>{t.workerCreationDesc}</DialogDescription>
+          </DialogHeader>
           <form
             className="space-y-3"
             onSubmit={(event) => {
@@ -242,9 +354,31 @@ function UsersPage() {
               if (canCreateWorker) inviteWorker.mutate();
             }}
           >
-            <div className="space-y-1"><Label htmlFor="worker-name">{t.fullName}</Label><Input id="worker-name" value={worker.fullName} onChange={(e) => setWorker({ ...worker, fullName: e.target.value })} /></div>
-            <div className="space-y-1"><Label htmlFor="worker-email">{t.email}</Label><Input id="worker-email" type="email" value={worker.email} onChange={(e) => setWorker({ ...worker, email: e.target.value })} /></div>
-            <div className="space-y-1"><Label htmlFor="worker-phone">{t.phone}</Label><Input id="worker-phone" value={worker.phone} onChange={(e) => setWorker({ ...worker, phone: e.target.value })} /></div>
+            <div className="space-y-1">
+              <Label htmlFor="worker-name">{t.fullName}</Label>
+              <Input
+                id="worker-name"
+                value={worker.fullName}
+                onChange={(e) => setWorker({ ...worker, fullName: e.target.value })}
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="worker-email">{t.email}</Label>
+              <Input
+                id="worker-email"
+                type="email"
+                value={worker.email}
+                onChange={(e) => setWorker({ ...worker, email: e.target.value })}
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="worker-phone">{t.phone}</Label>
+              <Input
+                id="worker-phone"
+                value={worker.phone}
+                onChange={(e) => setWorker({ ...worker, phone: e.target.value })}
+              />
+            </div>
             <div className="space-y-1">
               <Label htmlFor="worker-password">{t.initialPassword}</Label>
               <div className="relative">
@@ -262,18 +396,54 @@ function UsersPage() {
                   type="button"
                   onClick={() => setShowInitialPassword((visible) => !visible)}
                   className="absolute right-1 top-1/2 inline-flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  aria-label={showInitialPassword ? "Hide initial password" : "Show initial password"}
+                  aria-label={
+                    showInitialPassword ? "Hide initial password" : "Show initial password"
+                  }
                   aria-pressed={showInitialPassword}
                 >
-                  {showInitialPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  {showInitialPassword ? (
+                    <EyeOff className="h-4 w-4" />
+                  ) : (
+                    <Eye className="h-4 w-4" />
+                  )}
                 </button>
               </div>
-              <p className={passwordIsStrong || !worker.initialPassword ? "text-xs text-muted-foreground" : "text-xs text-destructive"}>
-                {localized("Koresha nibura inyuguti 12 zirimo inyuguti nto n'inkuru, umubare n'ikimenyetso.", "Use at least 12 characters, including upper- and lower-case letters, a number, and a symbol.")}
+              <p
+                className={
+                  passwordIsStrong || !worker.initialPassword
+                    ? "text-xs text-muted-foreground"
+                    : "text-xs text-destructive"
+                }
+              >
+                {localized(
+                  "Koresha nibura inyuguti 12 zirimo inyuguti nto n'inkuru, umubare n'ikimenyetso.",
+                  "Use at least 12 characters, including upper- and lower-case letters, a number, and a symbol.",
+                )}
               </p>
             </div>
-            <div className="space-y-1"><Label>{t.branch}</Label><Select value={worker.branchId} onValueChange={(branchId) => setWorker({ ...worker, branchId })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{branches.map((b: any) => <SelectItem key={b.id} value={b.id}>{b.name}</SelectItem>)}</SelectContent></Select></div>
-            <DialogFooter><Button type="submit" disabled={!canCreateWorker || inviteWorker.isPending}>{inviteWorker.isPending ? t.loading : t.createWorker}</Button></DialogFooter>
+            <div className="space-y-1">
+              <Label>{t.branch}</Label>
+              <Select
+                value={worker.branchId}
+                onValueChange={(branchId) => setWorker({ ...worker, branchId })}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {branches.map((b) => (
+                    <SelectItem key={b.id} value={b.id}>
+                      {b.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <DialogFooter>
+              <Button type="submit" disabled={!canCreateWorker || inviteWorker.isPending}>
+                {inviteWorker.isPending ? t.loading : t.createWorker}
+              </Button>
+            </DialogFooter>
           </form>
         </DialogContent>
       </Dialog>
@@ -285,7 +455,10 @@ function UsersPage() {
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>{t.cancel}</AlertDialogCancel>
-            <AlertDialogAction className="bg-destructive text-destructive-foreground hover:bg-destructive/90" onClick={() => removing && removeWorker.mutate(removing.user_id)}>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={() => removing && removeWorker.mutate(removing.user_id)}
+            >
               {removeWorker.isPending ? t.loading : t.removeWorker}
             </AlertDialogAction>
           </AlertDialogFooter>

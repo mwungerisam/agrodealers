@@ -1,9 +1,16 @@
+import { fetchAllRows } from "@/lib/fetch-all-rows";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { generateReportPdf } from "@/lib/pdf";
 import { t, money, numberFmt, fmtDate, fmtDateTime, localized } from "@/lib/i18n";
 import {
@@ -29,6 +36,7 @@ import { SetupBanner } from "@/components/setup-banner";
 import { OwnerEveningReminder } from "@/components/owner-evening-reminder";
 import { localDateInput } from "@/lib/utils";
 import { toast } from "sonner";
+import { QueryState } from "@/components/query-state";
 
 export const Route = createFileRoute("/_authenticated/dashboard")({
   component: Dashboard,
@@ -64,7 +72,12 @@ function Dashboard() {
   const tomorrowStart = tomorrow.toISOString();
 
   // ---- Summary stats ----
-  const { data: stats } = useQuery({
+  const {
+    data: stats,
+    isPending: statsPending,
+    error: statsError,
+    refetch: retryStats,
+  } = useQuery({
     queryKey: ["dashboard-stats", branchId, isOwner, today],
     staleTime: 60_000,
     queryFn: async () => {
@@ -73,42 +86,70 @@ function Dashboard() {
         .select("quantity, selling_price, profit")
         .eq("sale_date", today);
       if (!isOwner && branchId) todaySalesQ.eq("branch_id", branchId);
-      const { data: sales, error: salesError } = await todaySalesQ;
-      if (salesError) throw salesError;
 
-      const invQ = supabase
-        .from("inventory")
-        .select(isOwner
-          ? "branch_id, product_id, quantity, avg_cost, products(name, unit, min_stock), branches(name)"
-          : "branch_id, product_id, quantity, avg_cost");
+      const invQ = isOwner
+        ? supabase
+            .from("inventory")
+            .select(
+              "branch_id, product_id, quantity, avg_cost, products(name, unit, min_stock), branches(name)",
+            )
+        : supabase.from("inventory").select("branch_id, product_id, quantity, avg_cost");
       if (!isOwner && branchId) invQ.eq("branch_id", branchId);
-      const { data: inventoryRows, error: inventoryError } = await invQ;
+      const expensesQ = supabase.from("expenses").select("amount").eq("expense_date", today);
+      if (!isOwner && branchId) expensesQ.eq("branch_id", branchId);
+      // These reads are independent; avoid a network round trip for every card.
+      const [
+        salesResult,
+        inventoryResult,
+        workerProductsResult,
+        branchesResult,
+        productsResult,
+        workersResult,
+        expensesResult,
+        branchResult,
+      ] = await Promise.all([
+        todaySalesQ,
+        invQ,
+        !isOwner ? supabase.from("worker_products").select("id, name, unit, min_stock") : null,
+        isOwner ? supabase.from("branches").select("id") : null,
+        isOwner ? supabase.from("products").select("id") : null,
+        isOwner ? supabase.from("user_roles").select("id") : null,
+        expensesQ,
+        !isOwner && branchId
+          ? supabase.from("branches").select("name").eq("id", branchId).maybeSingle()
+          : null,
+      ]);
+      const { data: sales, error: salesError } = salesResult;
+      if (salesError) throw salesError;
+      const { data: inventoryRows, error: inventoryError } = inventoryResult;
       if (inventoryError) throw inventoryError;
-      let inv = inventoryRows ?? [];
+      let inv: Array<{
+        branch_id: string;
+        product_id: string;
+        quantity: number;
+        avg_cost: number;
+        products?: { name: string | null; unit: string | null; min_stock: number | null } | null;
+        branches?: { name: string } | null;
+      }> = inventoryRows ?? [];
 
       if (!isOwner) {
-        const { data: workerProducts, error: workerProductsError } = await supabase
-          .from("worker_products")
-          .select("id, name, unit, min_stock");
+        const { data: workerProducts, error: workerProductsError } = workerProductsResult!;
         if (workerProductsError) throw workerProductsError;
-        const productMap = new Map((workerProducts ?? []).flatMap((product) => product.id ? [[product.id, product] as const] : []));
+        const productMap = new Map(
+          (workerProducts ?? []).flatMap((product) =>
+            product.id ? [[product.id, product] as const] : [],
+          ),
+        );
         inv = inv.map((item) => ({ ...item, products: productMap.get(item.product_id) }));
       }
 
-      const branchesResult = isOwner ? await supabase.from("branches").select("id") : null;
       if (branchesResult?.error) throw branchesResult.error;
-      const productsResult = isOwner
-        ? await supabase.from("products").select("id")
-        : await supabase.from("worker_products").select("id");
-      if (productsResult.error) throw productsResult.error;
-      const workersResult = isOwner ? await supabase.from("user_roles").select("id") : null;
+      if (productsResult?.error) throw productsResult.error;
       if (workersResult?.error) throw workersResult.error;
       const branches = branchesResult?.data ?? [];
-      const products = productsResult.data ?? [];
+      const products = (isOwner ? productsResult?.data : workerProductsResult?.data) ?? [];
       const workers = workersResult?.data ?? [];
-      const expensesQ = supabase.from("expenses").select("amount").eq("expense_date", today);
-      if (!isOwner && branchId) expensesQ.eq("branch_id", branchId);
-      const { data: exp, error: expensesError } = await expensesQ;
+      const { data: exp, error: expensesError } = expensesResult;
       if (expensesError) throw expensesError;
 
       const todaySales = (sales ?? []).reduce(
@@ -122,11 +163,12 @@ function Dashboard() {
         (s, x) => s + Number(x.quantity) * Number(x.avg_cost ?? 0),
         0,
       );
-      const lowStock = (inv ?? []).filter((item) => Number(item.quantity) <= Number((item.products as { min_stock?: number } | null)?.min_stock ?? 0));
+      const lowStock = (inv ?? []).filter(
+        (item) =>
+          Number(item.quantity) <=
+          Number((item.products as { min_stock?: number } | null)?.min_stock ?? 0),
+      );
 
-      const branchResult = !isOwner && branchId
-        ? await supabase.from("branches").select("name").eq("id", branchId).maybeSingle()
-        : null;
       if (branchResult?.error) throw branchResult.error;
 
       return {
@@ -148,7 +190,11 @@ function Dashboard() {
   });
 
   // ---- Branch performance (owner only) ----
-  const { data: branchStats } = useQuery({
+  const {
+    data: branchStats,
+    error: branchError,
+    refetch: retryBranches,
+  } = useQuery({
     queryKey: ["branch-performance", isOwner],
     enabled: isOwner,
     staleTime: 60_000,
@@ -157,7 +203,10 @@ function Dashboard() {
       monthStart.setDate(1);
       const ms = localDateInput(monthStart);
 
-      const { data: br } = await supabase.from("branches").select("id, name, status, created_at");
+      const { data: br, error: branchesError } = await supabase
+        .from("branches")
+        .select("id, name, status, created_at");
+      if (branchesError) throw branchesError;
       if (!br) return [];
 
       const results = await Promise.all(
@@ -167,28 +216,33 @@ function Dashboard() {
             .select("quantity, selling_price, profit")
             .eq("branch_id", b.id)
             .gte("sale_date", ms);
-          const { data: sales } = await salesQ;
+          const [salesResult, inventoryResult, workersResult] = await Promise.all([
+            salesQ,
+            supabase.from("inventory").select("quantity, avg_cost").eq("branch_id", b.id),
+            supabase
+              .from("user_roles")
+              .select("id", { count: "exact", head: true })
+              .eq("branch_id", b.id),
+          ]);
+          const { data: sales, error: salesError } = salesResult;
+          if (salesError) throw salesError;
           const rev = (sales ?? []).reduce(
             (s, x) => s + Number(x.selling_price) * Number(x.quantity),
             0,
           );
           const profit = (sales ?? []).reduce((s, x) => s + Number(x.profit), 0);
 
-          const { data: inv } = await supabase
-            .from("inventory")
-            .select("quantity, avg_cost")
-            .eq("branch_id", b.id);
+          const { data: inv, error: inventoryError } = inventoryResult;
+          if (inventoryError) throw inventoryError;
           const stockValue = (inv ?? []).reduce(
             (s, x) => s + Number(x.quantity) * Number(x.avg_cost ?? 0),
             0,
           );
           const totalStock = (inv ?? []).reduce((s, x) => s + Number(x.quantity), 0);
 
-          const { count: workerCount } = await supabase
-            .from("user_roles")
-            .select("id", { count: "exact" })
-            .eq("branch_id", b.id);
+          const { count: workerCount, error: workersError } = workersResult;
 
+          if (workersError) throw workersError;
           return {
             ...b,
             revenue: rev,
@@ -204,61 +258,88 @@ function Dashboard() {
   });
 
   // ---- Recent sales ----
-  const { data: recent } = useQuery({
+  const {
+    data: recent,
+    error: recentError,
+    refetch: retryRecent,
+  } = useQuery({
     queryKey: ["recent-sales", branchId, isOwner],
     staleTime: 60_000,
     queryFn: async () => {
       let q = supabase
         .from("sales")
         .select(
-          "id, quantity, selling_price, profit, sale_date, customer_name, products(name, unit), branches(name), created_by",
+          "id, product_id, quantity, selling_price, profit, sale_date, customer_name, branches(name), created_by",
         )
         .order("created_at", { ascending: false })
         .limit(8);
 
       if (!isOwner && branchId) q = q.eq("branch_id", branchId);
-      const { data } = await q;
-      return data ?? [];
+      const { data, error } = await q;
+      if (error) throw error;
+      const productQuery = isOwner
+        ? supabase.from("products").select("id, name, unit")
+        : supabase.from("worker_products").select("id, name, unit");
+      const { data: products, error: productError } = await productQuery;
+      if (productError) throw productError;
+      const productMap = new Map((products ?? []).map((product) => [product.id, product]));
+      return (data ?? []).map((sale) => ({ ...sale, products: productMap.get(sale.product_id) }));
     },
   });
 
   // ---- Recent activity created by workers (owner only) ----
-  const { data: workerActivity = [] } = useQuery({
+  const {
+    data: workerActivity = [],
+    error: activityError,
+    refetch: retryActivity,
+  } = useQuery({
     queryKey: ["worker-activity"],
     enabled: isOwner,
     staleTime: 30_000,
     queryFn: async (): Promise<WorkerActivity[]> => {
-      const [{ data: sales, error: salesError }, { data: customers, error: customersError }] = await Promise.all([
-        supabase
-          .from("sales")
-          .select("id, created_at, created_by, quantity, selling_price, customer_name, products(name), branches(name)")
-          .order("created_at", { ascending: false })
-          .limit(20),
-        supabase
-          .from("customers")
-          .select("id, created_at, created_by, name, phone, branches(name)")
-          .order("created_at", { ascending: false })
-          .limit(20),
-      ]);
+      const [{ data: sales, error: salesError }, { data: customers, error: customersError }] =
+        await Promise.all([
+          supabase
+            .from("sales")
+            .select(
+              "id, created_at, created_by, quantity, selling_price, customer_name, products(name), branches(name)",
+            )
+            .order("created_at", { ascending: false })
+            .limit(20),
+          supabase
+            .from("customers")
+            .select("id, created_at, created_by, name, phone, branches(name)")
+            .order("created_at", { ascending: false })
+            .limit(20),
+        ]);
 
       if (salesError) throw salesError;
       if (customersError) throw customersError;
 
-      const userIds = [...new Set([
-        ...(sales ?? []).map((sale) => sale.created_by),
-        ...(customers ?? []).map((customer) => customer.created_by),
-      ].filter((id): id is string => Boolean(id)))];
+      const userIds = [
+        ...new Set(
+          [
+            ...(sales ?? []).map((sale) => sale.created_by),
+            ...(customers ?? []).map((customer) => customer.created_by),
+          ].filter((id): id is string => Boolean(id)),
+        ),
+      ];
       if (userIds.length === 0) return [];
 
-      const [{ data: roles, error: rolesError }, { data: profiles, error: profilesError }] = await Promise.all([
-        supabase.from("user_roles").select("user_id, role").in("user_id", userIds),
-        supabase.from("profiles").select("id, full_name").in("id", userIds),
-      ]);
+      const [{ data: roles, error: rolesError }, { data: profiles, error: profilesError }] =
+        await Promise.all([
+          supabase.from("user_roles").select("user_id, role").in("user_id", userIds),
+          supabase.from("profiles").select("id, full_name").in("id", userIds),
+        ]);
       if (rolesError) throw rolesError;
       if (profilesError) throw profilesError;
 
-      const workerIds = new Set((roles ?? []).filter((role) => role.role !== "owner").map((role) => role.user_id));
-      const names = new Map((profiles ?? []).map((profile) => [profile.id, profile.full_name.trim() || "Worker"]));
+      const workerIds = new Set(
+        (roles ?? []).filter((role) => role.role !== "owner").map((role) => role.user_id),
+      );
+      const names = new Map(
+        (profiles ?? []).map((profile) => [profile.id, profile.full_name.trim() || "Worker"]),
+      );
 
       const saleActivity: WorkerActivity[] = (sales ?? [])
         .filter((sale) => sale.created_by && workerIds.has(sale.created_by))
@@ -290,19 +371,35 @@ function Dashboard() {
     },
   });
 
-  const { data: workerPerformance = [] } = useQuery({
+  const {
+    data: workerPerformance = [],
+    error: performanceError,
+    refetch: retryPerformance,
+  } = useQuery({
     queryKey: ["worker-daily-performance", today],
     enabled: isOwner,
     staleTime: 30_000,
     queryFn: async (): Promise<WorkerDailyPerformance[]> => {
-      const [{ data: sales, error: salesError }, { data: customers, error: customersError }, { data: roles, error: rolesError }] = await Promise.all([
-        supabase.from("sales").select("created_by, quantity, selling_price").eq("sale_date", today),
-        supabase.from("customers").select("created_by").gte("created_at", todayStart).lt("created_at", tomorrowStart),
-        supabase.from("user_roles").select("user_id, role").neq("role", "owner"),
+      const [sales, customers, roles] = await Promise.all([
+        fetchAllRows(
+          supabase
+            .from("sales")
+            .select("created_by, quantity, selling_price")
+            .eq("sale_date", today)
+            .order("id"),
+        ),
+        fetchAllRows(
+          supabase
+            .from("customers")
+            .select("created_by")
+            .gte("created_at", todayStart)
+            .lt("created_at", tomorrowStart)
+            .order("id"),
+        ),
+        fetchAllRows(
+          supabase.from("user_roles").select("user_id, role").neq("role", "owner").order("id"),
+        ),
       ]);
-      if (salesError) throw salesError;
-      if (customersError) throw customersError;
-      if (rolesError) throw rolesError;
 
       const workerIds = (roles ?? []).map((role) => role.user_id);
       if (workerIds.length === 0) return [];
@@ -312,8 +409,21 @@ function Dashboard() {
         .in("id", workerIds);
       if (profilesError) throw profilesError;
 
-      const names = new Map((profiles ?? []).map((profile) => [profile.id, profile.full_name.trim() || "Worker"]));
-      const performance = new Map(workerIds.map((id) => [id, { userId: id, workerName: names.get(id) ?? "Worker", salesCount: 0, salesValue: 0, customersAdded: 0 }]));
+      const names = new Map(
+        (profiles ?? []).map((profile) => [profile.id, profile.full_name.trim() || "Worker"]),
+      );
+      const performance = new Map(
+        workerIds.map((id) => [
+          id,
+          {
+            userId: id,
+            workerName: names.get(id) ?? "Worker",
+            salesCount: 0,
+            salesValue: 0,
+            customersAdded: 0,
+          },
+        ]),
+      );
       for (const sale of sales ?? []) {
         if (!sale.created_by || !performance.has(sale.created_by)) continue;
         const row = performance.get(sale.created_by)!;
@@ -324,7 +434,9 @@ function Dashboard() {
         if (!customer.created_by || !performance.has(customer.created_by)) continue;
         performance.get(customer.created_by)!.customersAdded += 1;
       }
-      return [...performance.values()].sort((a, b) => b.salesValue - a.salesValue || b.customersAdded - a.customersAdded);
+      return [...performance.values()].sort(
+        (a, b) => b.salesValue - a.salesValue || b.customersAdded - a.customersAdded,
+      );
     },
   });
 
@@ -402,18 +514,52 @@ function Dashboard() {
     }
 
     try {
-      const [{ data: sales, error: salesError }, { data: purchases, error: purchasesError }, { data: expenses, error: expensesError }, { data: inventory, error: inventoryError }] = await Promise.all([
-        supabase.from("sales").select("quantity, selling_price, profit, sale_date, customer_name, products(name), branches(name)").gte("sale_date", from).lte("sale_date", to).order("sale_date", { ascending: false }),
-        supabase.from("purchases").select("quantity, buying_price, transport_cost, supplier, purchase_date, products(name), branches(name)").gte("purchase_date", from).lte("purchase_date", to).order("purchase_date", { ascending: false }),
-        supabase.from("expenses").select("description, amount, expense_date, branches(name)").gte("expense_date", from).lte("expense_date", to).order("expense_date", { ascending: false }),
-        supabase.from("inventory").select("quantity, products(name, unit, min_stock), branches(name)").order("quantity", { ascending: true }),
+      const [sales, purchases, expenses, inventory] = await Promise.all([
+        fetchAllRows(
+          supabase
+            .from("sales")
+            .select(
+              "quantity, selling_price, profit, sale_date, customer_name, products(name), branches(name)",
+            )
+            .gte("sale_date", from)
+            .lte("sale_date", to)
+            .order("sale_date", { ascending: false })
+            .order("id"),
+        ),
+        fetchAllRows(
+          supabase
+            .from("purchases")
+            .select(
+              "quantity, buying_price, transport_cost, supplier, purchase_date, products(name), branches(name)",
+            )
+            .gte("purchase_date", from)
+            .lte("purchase_date", to)
+            .order("purchase_date", { ascending: false })
+            .order("id"),
+        ),
+        fetchAllRows(
+          supabase
+            .from("expenses")
+            .select("description, amount, expense_date, branches(name)")
+            .gte("expense_date", from)
+            .lte("expense_date", to)
+            .order("expense_date", { ascending: false })
+            .order("id"),
+        ),
+        fetchAllRows(
+          supabase
+            .from("inventory")
+            .select("quantity, products(name, unit, min_stock), branches(name)")
+            .order("quantity", { ascending: true })
+            .order("branch_id")
+            .order("product_id"),
+        ),
       ]);
-      if (salesError) throw salesError;
-      if (purchasesError) throw purchasesError;
-      if (expensesError) throw expensesError;
-      if (inventoryError) throw inventoryError;
 
-      const branchMap = new Map<string, { branch: string; sales: number; revenue: number; profit: number }>();
+      const branchMap = new Map<
+        string,
+        { branch: string; sales: number; revenue: number; profit: number }
+      >();
       for (const sale of sales ?? []) {
         const branch = sale.branches?.name ?? "Unassigned branch";
         const row = branchMap.get(branch) ?? { branch, sales: 0, revenue: 0, profit: 0 };
@@ -423,9 +569,18 @@ function Dashboard() {
         branchMap.set(branch, row);
       }
       const totals = {
-        sales: (sales ?? []).reduce((sum, sale) => sum + Number(sale.selling_price) * Number(sale.quantity), 0),
+        sales: (sales ?? []).reduce(
+          (sum, sale) => sum + Number(sale.selling_price) * Number(sale.quantity),
+          0,
+        ),
         profit: (sales ?? []).reduce((sum, sale) => sum + Number(sale.profit), 0),
-        purchases: (purchases ?? []).reduce((sum, purchase) => sum + Number(purchase.buying_price) * Number(purchase.quantity) + Number(purchase.transport_cost), 0),
+        purchases: (purchases ?? []).reduce(
+          (sum, purchase) =>
+            sum +
+            Number(purchase.buying_price) * Number(purchase.quantity) +
+            Number(purchase.transport_cost),
+          0,
+        ),
         expenses: (expenses ?? []).reduce((sum, expense) => sum + Number(expense.amount), 0),
         net: 0,
         customers: new Set((sales ?? []).map((sale) => sale.customer_name).filter(Boolean)).size,
@@ -436,13 +591,40 @@ function Dashboard() {
         title: `${label} Business Report`,
         period: `${fmtDate(from)} – ${fmtDate(to)}`,
         branchName: "All branches",
-        sales: (sales ?? []).map((sale) => ({ date: sale.sale_date, branch: sale.branches?.name ?? "Unassigned branch", product: sale.products?.name ?? "", customer: sale.customer_name ?? "Walk-in customer", qty: Number(sale.quantity), price: Number(sale.selling_price), profit: Number(sale.profit) })),
-        purchases: (purchases ?? []).map((purchase) => ({ date: purchase.purchase_date, branch: purchase.branches?.name ?? "Unassigned branch", product: purchase.products?.name ?? "", supplier: purchase.supplier, qty: Number(purchase.quantity), price: Number(purchase.buying_price), transport: Number(purchase.transport_cost) })),
-        expenses: (expenses ?? []).map((expense) => ({ date: expense.expense_date, branch: expense.branches?.name ?? "Unassigned branch", description: expense.description, amount: Number(expense.amount) })),
+        sales: (sales ?? []).map((sale) => ({
+          date: sale.sale_date,
+          branch: sale.branches?.name ?? "Unassigned branch",
+          product: sale.products?.name ?? "",
+          customer: sale.customer_name ?? "Walk-in customer",
+          qty: Number(sale.quantity),
+          price: Number(sale.selling_price),
+          profit: Number(sale.profit),
+        })),
+        purchases: (purchases ?? []).map((purchase) => ({
+          date: purchase.purchase_date,
+          branch: purchase.branches?.name ?? "Unassigned branch",
+          product: purchase.products?.name ?? "",
+          supplier: purchase.supplier,
+          qty: Number(purchase.quantity),
+          price: Number(purchase.buying_price),
+          transport: Number(purchase.transport_cost),
+        })),
+        expenses: (expenses ?? []).map((expense) => ({
+          date: expense.expense_date,
+          branch: expense.branches?.name ?? "Unassigned branch",
+          description: expense.description,
+          amount: Number(expense.amount),
+        })),
         inventory: (inventory ?? []).map((item) => {
           const quantity = Number(item.quantity);
           const minimum = Number(item.products?.min_stock ?? 0);
-          return { branch: item.branches?.name ?? "Unassigned branch", product: item.products?.name ?? "Product", quantity, unit: item.products?.unit ?? "", status: quantity <= 0 ? "Out of stock" : quantity <= minimum ? "Low stock" : "In stock" };
+          return {
+            branch: item.branches?.name ?? "Unassigned branch",
+            product: item.products?.name ?? "Product",
+            quantity,
+            unit: item.products?.unit ?? "",
+            status: quantity <= 0 ? "Out of stock" : quantity <= minimum ? "Low stock" : "In stock",
+          };
         }),
         totals,
         branchPerformance: [...branchMap.values()].sort((a, b) => b.revenue - a.revenue),
@@ -453,8 +635,22 @@ function Dashboard() {
     }
   };
 
+  if (statsPending || statsError)
+    return <QueryState pending={statsPending} error={statsError} retry={() => void retryStats()} />;
+
   return (
     <div className="space-y-6">
+      <QueryState
+        error={branchError || recentError || activityError || performanceError}
+        retry={() => {
+          void retryRecent();
+          if (isOwner) {
+            void retryBranches();
+            void retryActivity();
+            void retryPerformance();
+          }
+        }}
+      />
       <section className="relative overflow-hidden rounded-2xl border bg-card p-5 shadow-sm sm:p-6">
         <div className="absolute -right-16 -top-20 h-48 w-48 rounded-full bg-primary/10 blur-3xl" />
         <div className="relative flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
@@ -472,22 +668,46 @@ function Dashboard() {
             {!isOwner && branchId && (
               <div className="mt-4 inline-flex items-center gap-2 rounded-lg bg-muted px-3 py-2 text-xs font-semibold">
                 <Building2 className="h-4 w-4 text-primary" />
-                {(stats as any)?.branchName || "Your assigned branch"}
+                {stats?.branchName || "Your assigned branch"}
               </div>
             )}
           </div>
           <div className="flex flex-wrap gap-2">
             {isOwner ? (
               <>
-                <Link to="/products" className="inline-flex h-9 items-center gap-2 rounded-lg border bg-background px-3 text-xs font-semibold transition hover:bg-muted">
+                <Link
+                  to="/products"
+                  className="inline-flex h-9 items-center gap-2 rounded-lg border bg-background px-3 text-xs font-semibold transition hover:bg-muted"
+                >
                   <Plus className="h-4 w-4" /> {t.products}
                 </Link>
-                <Link to="/purchases" className="inline-flex h-9 items-center gap-2 rounded-lg bg-primary px-3 text-xs font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90">
+                <Link
+                  to="/purchases"
+                  className="inline-flex h-9 items-center gap-2 rounded-lg bg-primary px-3 text-xs font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90"
+                >
                   <Plus className="h-4 w-4" /> {t.purchases}
                 </Link>
                 <DropdownMenu>
-                  <DropdownMenuTrigger asChild><Button variant="outline" size="sm" className="h-9"><Download className="mr-2 h-4 w-4" /> Download PDF</Button></DropdownMenuTrigger>
-                  <DropdownMenuContent align="end" className="w-52"><DropdownMenuLabel>Business report</DropdownMenuLabel><DropdownMenuItem onSelect={() => void downloadOverviewReport("daily")}>Daily report</DropdownMenuItem><DropdownMenuItem onSelect={() => void downloadOverviewReport("weekly")}>Weekly report</DropdownMenuItem><DropdownMenuItem onSelect={() => void downloadOverviewReport("monthly")}>Monthly report</DropdownMenuItem><DropdownMenuItem onSelect={() => void downloadOverviewReport("annual")}>Annual report</DropdownMenuItem></DropdownMenuContent>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="outline" size="sm" className="h-9">
+                      <Download className="mr-2 h-4 w-4" /> Download PDF
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="w-52">
+                    <DropdownMenuLabel>Business report</DropdownMenuLabel>
+                    <DropdownMenuItem onSelect={() => void downloadOverviewReport("daily")}>
+                      Daily report
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onSelect={() => void downloadOverviewReport("weekly")}>
+                      Weekly report
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onSelect={() => void downloadOverviewReport("monthly")}>
+                      Monthly report
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onSelect={() => void downloadOverviewReport("annual")}>
+                      Annual report
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
                 </DropdownMenu>
                 <OwnerEveningReminder
                   salesValue={money(stats?.todaySales ?? 0)}
@@ -498,7 +718,10 @@ function Dashboard() {
                 </Button>
               </>
             ) : (
-              <Link to="/sales" className="inline-flex h-9 items-center gap-2 rounded-lg bg-primary px-3 text-xs font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90">
+              <Link
+                to="/sales"
+                className="inline-flex h-9 items-center gap-2 rounded-lg bg-primary px-3 text-xs font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90"
+              >
                 <Plus className="h-4 w-4" /> {t.sales}
               </Link>
             )}
@@ -516,43 +739,89 @@ function Dashboard() {
               ? [{ message: "Step 2: Add your first product.", to: "/products", label: t.products }]
               : []),
             ...(stats && stats.branchCount > 0 && stats.productCount > 0 && stats.totalStock === 0
-              ? [{ message: "Step 3: Record a purchase to stock your inventory.", to: "/purchases", label: t.purchases }]
+              ? [
+                  {
+                    message: "Step 3: Record a purchase to stock your inventory.",
+                    to: "/purchases",
+                    label: t.purchases,
+                  },
+                ]
               : []),
           ]}
         />
       )}
-
 
       {!isOwner && (
         <Card>
           <CardHeader className="border-b pb-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <CardTitle className="text-base font-bold">Available stock</CardTitle>
-              <p className="mt-1 text-xs text-muted-foreground">Stock received and maintained by the business owner for your assigned branch.</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Stock received and maintained by the business owner for your assigned branch.
+              </p>
             </div>
-            <Link to="/inventory" className="text-xs font-semibold text-primary hover:underline">View inventory <ArrowUpRight className="ml-1 inline h-3.5 w-3.5" /></Link>
+            <Link to="/inventory" className="text-xs font-semibold text-primary hover:underline">
+              View inventory <ArrowUpRight className="ml-1 inline h-3.5 w-3.5" />
+            </Link>
           </CardHeader>
           <CardContent className="p-0">
             {stats?.inventory.length ? (
               <div className="divide-y">
                 {stats.inventory.map((item) => {
                   const quantity = Number(item.quantity);
-                  const minimum = Number((item.products as { min_stock?: number } | null)?.min_stock ?? 0);
-                  const status = quantity <= 0 ? "Out of stock" : quantity <= minimum ? "Low stock" : "In stock";
-                  const statusClass = quantity <= 0 ? "bg-red-100 text-red-800" : quantity <= minimum ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-800";
+                  const minimum = Number(
+                    (item.products as { min_stock?: number } | null)?.min_stock ?? 0,
+                  );
+                  const status =
+                    quantity <= 0 ? "Out of stock" : quantity <= minimum ? "Low stock" : "In stock";
+                  const statusClass =
+                    quantity <= 0
+                      ? "bg-red-100 text-red-800"
+                      : quantity <= minimum
+                        ? "bg-amber-100 text-amber-800"
+                        : "bg-emerald-100 text-emerald-800";
                   return (
-                    <div key={`${item.branch_id}-${item.product_id}`} className="flex items-center justify-between gap-4 px-5 py-3.5">
+                    <div
+                      key={`${item.branch_id}-${item.product_id}`}
+                      className="flex items-center justify-between gap-4 px-5 py-3.5"
+                    >
                       <div className="flex min-w-0 items-center gap-3">
-                        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"><Boxes className="h-4 w-4" /></div>
-                        <div className="min-w-0"><p className="truncate text-sm font-semibold">{(item.products as { name?: string } | null)?.name ?? "Product"}</p><p className="mt-0.5 text-xs text-muted-foreground">Minimum: {numberFmt(minimum)} {(item.products as { unit?: string } | null)?.unit ?? "kg"}</p></div>
+                        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                          <Boxes className="h-4 w-4" />
+                        </div>
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-semibold">
+                            {(item.products as { name?: string } | null)?.name ?? "Product"}
+                          </p>
+                          <p className="mt-0.5 text-xs text-muted-foreground">
+                            Minimum: {numberFmt(minimum)}{" "}
+                            {(item.products as { unit?: string } | null)?.unit ?? "kg"}
+                          </p>
+                        </div>
                       </div>
-                      <div className="shrink-0 text-right"><p className="text-sm font-bold">{numberFmt(quantity)} {(item.products as { unit?: string } | null)?.unit ?? ""}</p><span className={`mt-1 inline-flex rounded-full px-2 py-0.5 text-[11px] font-bold ${statusClass}`}>{status}</span></div>
+                      <div className="shrink-0 text-right">
+                        <p className="text-sm font-bold">
+                          {numberFmt(quantity)}{" "}
+                          {(item.products as { unit?: string } | null)?.unit ?? ""}
+                        </p>
+                        <span
+                          className={`mt-1 inline-flex rounded-full px-2 py-0.5 text-[11px] font-bold ${statusClass}`}
+                        >
+                          {status}
+                        </span>
+                      </div>
                     </div>
                   );
                 })}
               </div>
             ) : (
-              <div className="px-5 py-12 text-center"><Boxes className="mx-auto h-8 w-8 text-muted-foreground/35" /><p className="mt-2 text-sm font-medium">No stock available yet</p><p className="mt-1 text-xs text-muted-foreground">The owner will add stock to this branch through purchases.</p></div>
+              <div className="px-5 py-12 text-center">
+                <Boxes className="mx-auto h-8 w-8 text-muted-foreground/35" />
+                <p className="mt-2 text-sm font-medium">No stock available yet</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  The owner will add stock to this branch through purchases.
+                </p>
+              </div>
             )}
           </CardContent>
         </Card>
@@ -560,12 +829,19 @@ function Dashboard() {
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
         {cards.map((c) => (
-          <Card key={c.label} className="group border bg-card shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md">
+          <Card
+            key={c.label}
+            className="group border bg-card shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md"
+          >
             <CardContent className="p-4 sm:p-5">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{c.label}</p>
-                  <p className="mt-2 text-xl font-extrabold tracking-tight sm:text-2xl">{c.value}</p>
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                    {c.label}
+                  </p>
+                  <p className="mt-2 text-xl font-extrabold tracking-tight sm:text-2xl">
+                    {c.value}
+                  </p>
                 </div>
                 <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary/10">
                   <c.icon className={`h-[18px] w-[18px] ${c.tone}`} />
@@ -581,9 +857,13 @@ function Dashboard() {
           <CardHeader className="border-b pb-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <CardTitle className="text-base font-bold">{t.branchPerformance}</CardTitle>
-              <p className="mt-1 text-xs text-muted-foreground">Performance for the current month</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Performance for the current month
+              </p>
             </div>
-            <Link to="/branches" className="text-xs font-semibold text-primary hover:underline">View branches <ArrowUpRight className="ml-1 inline h-3.5 w-3.5" /></Link>
+            <Link to="/branches" className="text-xs font-semibold text-primary hover:underline">
+              View branches <ArrowUpRight className="ml-1 inline h-3.5 w-3.5" />
+            </Link>
           </CardHeader>
           <CardContent className="p-0">
             <div className="overflow-x-auto">
@@ -598,16 +878,29 @@ function Dashboard() {
                   </tr>
                 </thead>
                 <tbody>
-                  {branchStats.length ? branchStats.map((b) => (
-                    <tr key={b.id} className="border-t transition hover:bg-muted/30">
-                      <td className="px-5 py-3.5 font-semibold">{b.name}</td>
-                      <td className="px-5 py-3.5 font-medium">{money(b.revenue)}</td>
-                      <td className="px-5 py-3.5 font-semibold text-emerald-600">{money(b.profit)}</td>
-                      <td className="px-5 py-3.5">{numberFmt(b.workerCount)}</td>
-                      <td className="px-5 py-3.5 text-right">{numberFmt(b.totalStock)} {b.totalStock ? "KG" : ""}</td>
+                  {branchStats.length ? (
+                    branchStats.map((b) => (
+                      <tr key={b.id} className="border-t transition hover:bg-muted/30">
+                        <td className="px-5 py-3.5 font-semibold">{b.name}</td>
+                        <td className="px-5 py-3.5 font-medium">{money(b.revenue)}</td>
+                        <td className="px-5 py-3.5 font-semibold text-emerald-600">
+                          {money(b.profit)}
+                        </td>
+                        <td className="px-5 py-3.5">{numberFmt(b.workerCount)}</td>
+                        <td className="px-5 py-3.5 text-right">
+                          {numberFmt(b.totalStock)} {b.totalStock ? "KG" : ""}
+                        </td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td
+                        colSpan={5}
+                        className="px-5 py-10 text-center text-sm text-muted-foreground"
+                      >
+                        {t.noData}
+                      </td>
                     </tr>
-                  )) : (
-                    <tr><td colSpan={5} className="px-5 py-10 text-center text-sm text-muted-foreground">{t.noData}</td></tr>
                   )}
                 </tbody>
               </table>
@@ -621,15 +914,50 @@ function Dashboard() {
           <CardHeader className="border-b pb-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <CardTitle className="text-base font-bold">Today’s worker performance</CardTitle>
-              <p className="mt-1 text-xs text-muted-foreground">Daily sales and customers added by each worker.</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Daily sales and customers added by each worker.
+              </p>
             </div>
-            <Link to="/sales" className="text-xs font-semibold text-primary hover:underline">View daily sales <ArrowUpRight className="ml-1 inline h-3.5 w-3.5" /></Link>
+            <Link to="/sales" className="text-xs font-semibold text-primary hover:underline">
+              View daily sales <ArrowUpRight className="ml-1 inline h-3.5 w-3.5" />
+            </Link>
           </CardHeader>
           <CardContent className="p-0">
             {workerPerformance.length > 0 ? (
-              <div className="overflow-x-auto"><table className="w-full min-w-[620px] text-sm"><thead className="bg-muted/40 text-xs text-muted-foreground"><tr><th className="px-5 py-3 text-left font-semibold">Worker</th><th className="px-5 py-3 text-right font-semibold">Sales</th><th className="px-5 py-3 text-right font-semibold">Sales value</th><th className="px-5 py-3 text-right font-semibold">Customers added</th></tr></thead><tbody>{workerPerformance.map((worker) => <tr key={worker.userId} className="border-t transition hover:bg-muted/30"><td className="px-5 py-3.5 font-semibold">{worker.workerName}</td><td className="px-5 py-3.5 text-right">{numberFmt(worker.salesCount)}</td><td className="px-5 py-3.5 text-right font-semibold">{money(worker.salesValue)}</td><td className="px-5 py-3.5 text-right">{numberFmt(worker.customersAdded)}</td></tr>)}</tbody></table></div>
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[620px] text-sm">
+                  <thead className="bg-muted/40 text-xs text-muted-foreground">
+                    <tr>
+                      <th className="px-5 py-3 text-left font-semibold">Worker</th>
+                      <th className="px-5 py-3 text-right font-semibold">Sales</th>
+                      <th className="px-5 py-3 text-right font-semibold">Sales value</th>
+                      <th className="px-5 py-3 text-right font-semibold">Customers added</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {workerPerformance.map((worker) => (
+                      <tr key={worker.userId} className="border-t transition hover:bg-muted/30">
+                        <td className="px-5 py-3.5 font-semibold">{worker.workerName}</td>
+                        <td className="px-5 py-3.5 text-right">{numberFmt(worker.salesCount)}</td>
+                        <td className="px-5 py-3.5 text-right font-semibold">
+                          {money(worker.salesValue)}
+                        </td>
+                        <td className="px-5 py-3.5 text-right">
+                          {numberFmt(worker.customersAdded)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             ) : (
-              <div className="px-5 py-12 text-center"><Users className="mx-auto h-8 w-8 text-muted-foreground/35" /><p className="mt-2 text-sm font-medium">No workers assigned yet</p><p className="mt-1 text-xs text-muted-foreground">Daily team performance will appear here as workers record sales and customers.</p></div>
+              <div className="px-5 py-12 text-center">
+                <Users className="mx-auto h-8 w-8 text-muted-foreground/35" />
+                <p className="mt-2 text-sm font-medium">No workers assigned yet</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Daily team performance will appear here as workers record sales and customers.
+                </p>
+              </div>
             )}
           </CardContent>
         </Card>
@@ -640,11 +968,17 @@ function Dashboard() {
           <CardHeader className="border-b pb-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <CardTitle className="text-base font-bold">Worker activity</CardTitle>
-              <p className="mt-1 text-xs text-muted-foreground">Recent sales and customer records created by your team.</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Recent sales and customer records created by your team.
+              </p>
             </div>
             <div className="flex items-center gap-3 text-xs font-semibold">
-              <Link to="/customers" className="text-primary hover:underline">Customers</Link>
-              <Link to="/sales" className="text-primary hover:underline">Sales <ArrowUpRight className="ml-1 inline h-3.5 w-3.5" /></Link>
+              <Link to="/customers" className="text-primary hover:underline">
+                Customers
+              </Link>
+              <Link to="/sales" className="text-primary hover:underline">
+                Sales <ArrowUpRight className="ml-1 inline h-3.5 w-3.5" />
+              </Link>
             </div>
           </CardHeader>
           <CardContent className="p-0">
@@ -653,17 +987,28 @@ function Dashboard() {
                 {workerActivity.map((activity) => {
                   const Icon = activity.type === "sale" ? ShoppingBag : UserPlus;
                   return (
-                    <div key={activity.id} className="flex items-center gap-3 px-5 py-3.5 transition hover:bg-muted/30">
-                      <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${activity.type === "sale" ? "bg-primary/10 text-primary" : "bg-sky-100 text-sky-700"}`}>
+                    <div
+                      key={activity.id}
+                      className="flex items-center gap-3 px-5 py-3.5 transition hover:bg-muted/30"
+                    >
+                      <div
+                        className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${activity.type === "sale" ? "bg-primary/10 text-primary" : "bg-sky-100 text-sky-700"}`}
+                      >
                         <Icon className="h-4 w-4" />
                       </div>
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-sm font-semibold">{activity.title}</p>
-                        <p className="mt-0.5 truncate text-xs text-muted-foreground">{activity.detail} · {activity.branchName}</p>
+                        <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                          {activity.detail} · {activity.branchName}
+                        </p>
                       </div>
                       <div className="shrink-0 text-right">
-                        {activity.amount !== undefined && <p className="text-sm font-bold">{money(activity.amount)}</p>}
-                        <p className="text-xs text-muted-foreground">{activity.workerName} · {fmtDateTime(activity.createdAt)}</p>
+                        {activity.amount !== undefined && (
+                          <p className="text-sm font-bold">{money(activity.amount)}</p>
+                        )}
+                        <p className="text-xs text-muted-foreground">
+                          {activity.workerName} · {fmtDateTime(activity.createdAt)}
+                        </p>
                       </div>
                     </div>
                   );
@@ -673,7 +1018,9 @@ function Dashboard() {
               <div className="px-5 py-12 text-center">
                 <Users className="mx-auto h-8 w-8 text-muted-foreground/35" />
                 <p className="mt-2 text-sm font-medium">No worker activity yet</p>
-                <p className="mt-1 text-xs text-muted-foreground">Sales and customers recorded by workers will appear here.</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Sales and customers recorded by workers will appear here.
+                </p>
               </div>
             )}
           </CardContent>
@@ -686,23 +1033,37 @@ function Dashboard() {
             <div className="flex items-center justify-between gap-3">
               <div>
                 <CardTitle className="text-base font-bold">{t.recentTransactions}</CardTitle>
-                <p className="mt-1 text-xs text-muted-foreground">Latest sales recorded in the system</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Latest sales recorded in the system
+                </p>
               </div>
-              <Link to="/sales" className="text-xs font-semibold text-primary hover:underline">View all</Link>
+              <Link to="/sales" className="text-xs font-semibold text-primary hover:underline">
+                View all
+              </Link>
             </div>
           </CardHeader>
           <CardContent className="p-0">
             {recent && recent.length > 0 ? (
               <div className="divide-y">
-                {recent.map((s: any) => (
-                  <div key={s.id} className="flex items-center justify-between gap-4 px-5 py-3.5 transition hover:bg-muted/30">
+                {recent.map((s) => (
+                  <div
+                    key={s.id}
+                    className="flex items-center justify-between gap-4 px-5 py-3.5 transition hover:bg-muted/30"
+                  >
                     <div className="min-w-0">
                       <p className="truncate text-sm font-semibold">{s.products?.name}</p>
-                      <p className="mt-0.5 truncate text-xs text-muted-foreground">{s.branches?.name} · {fmtDate(s.sale_date)} · {s.customer_name ?? "Walk-in customer"}</p>
+                      <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                        {s.branches?.name} · {fmtDate(s.sale_date)} ·{" "}
+                        {s.customer_name ?? "Walk-in customer"}
+                      </p>
                     </div>
                     <div className="shrink-0 text-right">
-                      <p className="text-sm font-bold">{money(Number(s.selling_price) * Number(s.quantity))}</p>
-                      <p className="mt-0.5 text-xs font-semibold text-emerald-600">+{money(s.profit)}</p>
+                      <p className="text-sm font-bold">
+                        {money(Number(s.selling_price) * Number(s.quantity))}
+                      </p>
+                      <p className="mt-0.5 text-xs font-semibold text-emerald-600">
+                        +{money(s.profit)}
+                      </p>
                     </div>
                   </div>
                 ))}
@@ -711,7 +1072,9 @@ function Dashboard() {
               <div className="px-5 py-12 text-center">
                 <TrendingUp className="mx-auto h-8 w-8 text-muted-foreground/35" />
                 <p className="mt-2 text-sm font-medium">{t.noData}</p>
-                <p className="mt-1 text-xs text-muted-foreground">Sales will appear here as they are recorded.</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Sales will appear here as they are recorded.
+                </p>
               </div>
             )}
           </CardContent>
@@ -722,23 +1085,32 @@ function Dashboard() {
             <div className="flex items-center justify-between gap-3">
               <div>
                 <CardTitle className="text-base font-bold">{t.lowStockLabel}</CardTitle>
-                <p className="mt-1 text-xs text-muted-foreground">Products below 1,000 kg that may need restocking</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Products below 1,000 kg that may need restocking
+                </p>
               </div>
-              <Link to="/inventory" className="text-xs font-semibold text-primary hover:underline">Manage stock</Link>
+              <Link to="/inventory" className="text-xs font-semibold text-primary hover:underline">
+                Manage stock
+              </Link>
             </div>
           </CardHeader>
           <CardContent className="p-0">
             {stats?.lowStock && stats.lowStock.length > 0 ? (
               <div className="divide-y">
-                {stats.lowStock.map((i: any) => (
-                  <div key={i.product_id} className="flex items-center justify-between gap-4 px-5 py-3.5">
+                {stats.lowStock.map((i) => (
+                  <div
+                    key={i.product_id}
+                    className="flex items-center justify-between gap-4 px-5 py-3.5"
+                  >
                     <div className="flex min-w-0 items-center gap-3">
                       <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-100 text-amber-700">
                         <AlertTriangle className="h-4 w-4" />
                       </div>
                       <p className="truncate text-sm font-semibold">{i.products?.name}</p>
                     </div>
-                    <span className="shrink-0 rounded-full bg-amber-100 px-2.5 py-1 text-xs font-bold text-amber-800">{numberFmt(i.quantity)} / {i.products?.unit}</span>
+                    <span className="shrink-0 rounded-full bg-amber-100 px-2.5 py-1 text-xs font-bold text-amber-800">
+                      {numberFmt(i.quantity)} / {i.products?.unit}
+                    </span>
                   </div>
                 ))}
               </div>
@@ -746,7 +1118,9 @@ function Dashboard() {
               <div className="px-5 py-12 text-center">
                 <Boxes className="mx-auto h-8 w-8 text-emerald-600/45" />
                 <p className="mt-2 text-sm font-medium">Stock levels look healthy</p>
-                <p className="mt-1 text-xs text-muted-foreground">{localized("Nta bicuruzwa bifite ububiko buke.", "No products are low in stock.")}</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {localized("Nta bicuruzwa bifite ububiko buke.", "No products are low in stock.")}
+                </p>
               </div>
             )}
           </CardContent>

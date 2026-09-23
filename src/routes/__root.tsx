@@ -10,6 +10,7 @@ import {
 import { useEffect, type ReactNode } from "react";
 
 import appCss from "../styles.css?url";
+import interFont from "@fontsource-variable/inter/files/inter-latin-wght-normal.woff2?url";
 import { AuthProvider } from "@/lib/auth-context";
 import { Toaster } from "@/components/ui/sonner";
 import { t } from "@/lib/i18n";
@@ -109,8 +110,11 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { rel: "apple-touch-icon", href: "/apple-touch-icon.png" },
       { rel: "manifest", href: "/manifest.webmanifest" },
       {
-        rel: "stylesheet",
-        href: "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap",
+        rel: "preload",
+        href: interFont,
+        as: "font",
+        type: "font/woff2",
+        crossOrigin: "anonymous",
       },
     ],
   }),
@@ -137,7 +141,7 @@ function RootShell({ children }: { children: ReactNode }) {
 function RootComponent() {
   const { queryClient } = Route.useRouteContext();
   useEffect(() => {
-    if ("serviceWorker" in navigator) {
+    if (import.meta.env.PROD && "serviceWorker" in navigator) {
       void navigator.serviceWorker.register("/sw.js").catch(() => undefined);
     }
   }, []);

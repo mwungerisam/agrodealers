@@ -4,12 +4,15 @@ import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
 
 type ServerEntry = {
-  fetch: (request: Request, env: unknown, ctx: unknown) => Promise<Response> | Response;
+  fetch: (
+    request: Request,
+    options?: { context?: { nonce?: string } },
+  ) => Promise<Response> | Response;
 };
 
 let serverEntryPromise: Promise<ServerEntry> | undefined;
 
-function withSecurityHeaders(response: Response, request: Request): Response {
+function withSecurityHeaders(response: Response, request: Request, nonce: string): Response {
   const headers = new Headers(response.headers);
   headers.set("X-Content-Type-Options", "nosniff");
   headers.set("X-Frame-Options", "DENY");
@@ -21,7 +24,10 @@ function withSecurityHeaders(response: Response, request: Request): Response {
     headers.set("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
   }
 
-  if (process.env.NODE_ENV === "production" && response.headers.get("content-type")?.includes("text/html")) {
+  if (
+    process.env.NODE_ENV === "production" &&
+    response.headers.get("content-type")?.includes("text/html")
+  ) {
     const supabaseOrigin = getSupabaseOrigin();
     headers.set(
       "Content-Security-Policy",
@@ -31,7 +37,7 @@ function withSecurityHeaders(response: Response, request: Request): Response {
         "object-src 'none'",
         "frame-ancestors 'none'",
         "form-action 'self'",
-        "script-src 'self'",
+        `script-src 'self' 'nonce-${nonce}'`,
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
         "font-src 'self' https://fonts.gstatic.com data:",
         "img-src 'self' data: blob:",
@@ -40,7 +46,11 @@ function withSecurityHeaders(response: Response, request: Request): Response {
     );
   }
 
-  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
 }
 
 function getSupabaseOrigin(): string {
@@ -91,16 +101,37 @@ function isH3SwallowedErrorBody(body: string): boolean {
 
 export default {
   async fetch(request: Request, env: unknown, ctx: unknown) {
+    const nonce = crypto.randomUUID().replaceAll("-", "");
+    const requestHeaders = new Headers(request.headers);
+    // Always replace a caller-supplied nonce. Router SSR uses this value on the
+    // hydration scripts, and the response CSP permits only this request's value.
+    requestHeaders.set("x-ufbc-nonce", nonce);
+    // The development adapter uses a Request proxy; constructing from its URL
+    // avoids depending on native Request internal slots that the proxy lacks.
+    const requestInit: RequestInit & { duplex?: "half" } = {
+      method: request.method,
+      headers: requestHeaders,
+      signal: request.signal,
+    };
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      requestInit.body = request.body;
+      requestInit.duplex = "half";
+    }
+    const securedRequest = new Request(request.url, requestInit);
     try {
       const handler = await getServerEntry();
-      const response = await handler.fetch(request, env, ctx);
-      return withSecurityHeaders(await normalizeCatastrophicSsrResponse(response), request);
+      const response = await handler.fetch(securedRequest, { context: { nonce } });
+      return withSecurityHeaders(await normalizeCatastrophicSsrResponse(response), request, nonce);
     } catch (error) {
       console.error(error);
-      return withSecurityHeaders(new Response(renderErrorPage(), {
-        status: 500,
-        headers: { "content-type": "text/html; charset=utf-8" },
-      }), request);
+      return withSecurityHeaders(
+        new Response(renderErrorPage(), {
+          status: 500,
+          headers: { "content-type": "text/html; charset=utf-8" },
+        }),
+        request,
+        nonce,
+      );
     }
   },
 };

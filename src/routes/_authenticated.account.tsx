@@ -40,14 +40,40 @@ function AccountPage() {
       </div>
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-lg"><KeyRound className="h-5 w-5" />{t.changePassword}</CardTitle>
+          <CardTitle className="flex items-center gap-2 text-lg">
+            <KeyRound className="h-5 w-5" />
+            {t.changePassword}
+          </CardTitle>
           <CardDescription>{t.passwordHint}</CardDescription>
         </CardHeader>
         <CardContent>
           <form onSubmit={changePassword} className="space-y-4">
-            <div className="space-y-2"><Label htmlFor="new-password">{t.newPassword}</Label><Input id="new-password" type="password" minLength={12} required value={password} onChange={(event) => setPassword(event.target.value)} /></div>
-            <div className="space-y-2"><Label htmlFor="confirm-password">{t.confirmPassword}</Label><Input id="confirm-password" type="password" minLength={12} required value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></div>
-            <Button type="submit" disabled={saving}>{saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}{t.changePassword}</Button>
+            <div className="space-y-2">
+              <Label htmlFor="new-password">{t.newPassword}</Label>
+              <Input
+                id="new-password"
+                type="password"
+                minLength={12}
+                required
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="confirm-password">{t.confirmPassword}</Label>
+              <Input
+                id="confirm-password"
+                type="password"
+                minLength={12}
+                required
+                value={confirmation}
+                onChange={(event) => setConfirmation(event.target.value)}
+              />
+            </div>
+            <Button type="submit" disabled={saving}>
+              {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              {t.changePassword}
+            </Button>
           </form>
         </CardContent>
       </Card>

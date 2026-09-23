@@ -17,6 +17,11 @@ dist-ssr
 .nitro
 *.local
 .env
+.env.*
+!.env.example
+.eslint-audit.json
+test-results/
+playwright-report/
 supabase/.temp/
 
 # Wrangler / Cloudflare

@@ -1,3 +1,4 @@
+import { QueryState } from "@/components/query-state";
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -6,13 +7,33 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "@/components/ui/dialog";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+  DialogFooter,
+} from "@/components/ui/dialog";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Plus, ShoppingCart, UserPlus } from "lucide-react";
 import { toast } from "sonner";
 import { t, money, fmtDate, formatErrorMessage, localized } from "@/lib/i18n";
-import { useIsOwner, useBranchId, useAuth } from "@/lib/auth-context";
+import { useIsOwner, useBranchId } from "@/lib/auth-context";
 import { SetupBanner } from "@/components/setup-banner";
 import { localDateInput } from "@/lib/utils";
 
@@ -30,7 +51,6 @@ type SaleProduct = {
 };
 
 function SalesPage() {
-  const { user } = useAuth();
   const isOwner = useIsOwner();
   const workerBranchId = useBranchId();
   const qc = useQueryClient();
@@ -38,6 +58,7 @@ function SalesPage() {
   const [customerOpen, setCustomerOpen] = useState(false);
   const [customerName, setCustomerName] = useState("");
   const [customerPhone, setCustomerPhone] = useState("");
+  const [customerLookup, setCustomerLookup] = useState("");
 
   const [form, setForm] = useState({
     branch_id: "",
@@ -47,16 +68,21 @@ function SalesPage() {
     sale_date: localDateInput(),
   });
 
-  const defaultBranch = isOwner ? "" : workerBranchId ?? "";
-  const effectiveBranchId = isOwner ? form.branch_id : workerBranchId ?? "";
-  const branchAccessError = !isOwner && !workerBranchId
-    ? "Your account is not assigned to a branch yet. Please contact the owner."
-    : null;
+  const defaultBranch = isOwner ? "" : (workerBranchId ?? "");
+  const effectiveBranchId = isOwner ? form.branch_id : (workerBranchId ?? "");
+  const branchAccessError =
+    !isOwner && !workerBranchId
+      ? "Your account is not assigned to a branch yet. Please contact the owner."
+      : null;
 
   const { data: branches = [] } = useQuery({
     queryKey: ["branches-active"],
     queryFn: async () => {
-      const { data, error } = await supabase.from("branches").select("id, name").eq("status", true).order("name");
+      const { data, error } = await supabase
+        .from("branches")
+        .select("id, name")
+        .eq("status", true)
+        .order("name");
       if (error) throw error;
       return data ?? [];
     },
@@ -79,11 +105,42 @@ function SalesPage() {
         .select("id, name, unit, selling_price, category")
         .order("name");
       if (error) throw error;
+      return (data ?? []).filter(
+        (product): product is SaleProduct =>
+          product.id !== null &&
+          product.name !== null &&
+          product.unit !== null &&
+          product.selling_price !== null &&
+          product.category !== null,
+      );
+    },
+  });
+
+  const { data: customerRecords = [] } = useQuery({
+    queryKey: ["customer-lookup", effectiveBranchId],
+    enabled: !!effectiveBranchId,
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("customers")
+        .select("id, name, phone")
+        .eq("branch_id", effectiveBranchId)
+        .order("name");
+      if (error) throw error;
       return data ?? [];
     },
   });
 
   const selectedProduct = products.find((p) => p.id === form.product_id);
+  const matchingCustomers = (
+    customerRecords as Array<{ id: string; name: string; phone: string | null }>
+  ).filter((customer) => {
+    const query = customerLookup.trim().toLowerCase();
+    if (!query) return false;
+    return (
+      customer.name.toLowerCase().includes(query) ||
+      (customer.phone ?? "").toLowerCase().includes(query)
+    );
+  });
 
   const { data: stock } = useQuery({
     queryKey: ["stock-for-sale", effectiveBranchId, form.product_id],
@@ -100,7 +157,12 @@ function SalesPage() {
     },
   });
 
-  const { data: sales = [] } = useQuery({
+  const {
+    data: sales = [],
+    isPending: pagePending,
+    error: pageError,
+    refetch: retryPage,
+  } = useQuery({
     queryKey: ["sales-list", isOwner],
     queryFn: async () => {
       const { data, error } = await supabase
@@ -125,7 +187,7 @@ function SalesPage() {
   // Auto-calculate total
   const qty = Number(form.quantity) || 0;
   const catalogPrice = Number(selectedProduct?.selling_price) || 0;
-  const unitPrice = isOwner ? Number(form.selling_price) || catalogPrice : catalogPrice;
+  const unitPrice = catalogPrice;
   const lineTotal = qty * unitPrice;
   const availableStock = Number(stock?.quantity ?? 0);
 
@@ -146,35 +208,14 @@ function SalesPage() {
       const cleanCustomerName = customerName.trim();
       const cleanCustomerPhone = customerPhone.trim() || null;
       const targetBranchId = effectiveBranchId;
-      const { data: matchingCustomers, error: lookupError } = await supabase
-        .from("customers")
-        .select("id, phone")
-        .eq("branch_id", targetBranchId)
-        .eq("name", cleanCustomerName)
-        .limit(20);
-      if (lookupError) throw lookupError;
-      const existingCustomer = matchingCustomers?.find((customer) => (customer.phone ?? null) === cleanCustomerPhone);
-      let customerId = existingCustomer?.id ?? null;
-      if (!customerId) {
-        const { data: createdCustomer, error: customerError } = await supabase
-          .from("customers")
-          .insert({ name: cleanCustomerName, phone: cleanCustomerPhone, branch_id: targetBranchId, created_by: user?.id ?? null })
-          .select("id")
-          .single();
-        if (customerError) throw customerError;
-        customerId = createdCustomer.id;
-      }
-
-      const { error } = await supabase.from("sales").insert({
-        branch_id: targetBranchId,
-        product_id: form.product_id,
-        quantity: qty,
-        selling_price: unitPrice,
-        sale_date: form.sale_date,
-        customer_id: customerId,
-        customer_name: cleanCustomerName,
-        customer_phone: cleanCustomerPhone,
-        created_by: user?.id ?? null,
+      const { error } = await supabase.rpc("create_sale", {
+        p_branch_id: targetBranchId,
+        p_product_id: form.product_id,
+        p_quantity: qty,
+        p_selling_price: unitPrice,
+        p_sale_date: form.sale_date,
+        p_customer_name: cleanCustomerName,
+        p_customer_phone: cleanCustomerPhone,
       });
       if (error) throw error;
     },
@@ -189,6 +230,7 @@ function SalesPage() {
       setForm({ ...form, product_id: "", quantity: "", selling_price: "" });
       setCustomerName("");
       setCustomerPhone("");
+      setCustomerLookup("");
     },
     onError: (e: Error) => {
       toast.error(formatErrorMessage(e));
@@ -206,6 +248,7 @@ function SalesPage() {
     });
     setCustomerName("");
     setCustomerPhone("");
+    setCustomerLookup("");
   };
 
   const openNew = () => {
@@ -217,22 +260,34 @@ function SalesPage() {
     setOpen(true);
   };
 
+  if (pagePending || pageError)
+    return <QueryState pending={pagePending} error={pageError} retry={() => void retryPage()} />;
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-extrabold tracking-tight sm:text-3xl">{t.sales}</h1>
-          <p className="text-sm text-muted-foreground">{localized("Andika amakuru y'igurisha ry'ibicuruzwa.", "Record product sales.")}</p>
+          <p className="text-sm text-muted-foreground">
+            {localized("Andika amakuru y'igurisha ry'ibicuruzwa.", "Record product sales.")}
+          </p>
         </div>
         <Dialog open={open} onOpenChange={setOpen}>
           <DialogTrigger asChild>
-            <Button onClick={openNew} disabled={branches.length === 0 || products.length === 0 || (!isOwner && !workerBranchId)}>
+            <Button
+              onClick={openNew}
+              disabled={
+                branches.length === 0 || products.length === 0 || (!isOwner && !workerBranchId)
+              }
+            >
               <Plus className="mr-2 h-4 w-4" /> {t.add}
             </Button>
           </DialogTrigger>
           <DialogContent className="max-h-[calc(100dvh-2rem)] max-w-2xl overflow-y-auto p-4 sm:p-6">
             <DialogHeader>
-              <DialogTitle>{t.add} {t.sales}</DialogTitle>
+              <DialogTitle>
+                {t.add} {t.sales}
+              </DialogTitle>
             </DialogHeader>
 
             <div className="space-y-4">
@@ -242,14 +297,24 @@ function SalesPage() {
                   <Label>{t.branch} *</Label>
                   <Select
                     value={form.branch_id}
-                    onValueChange={(v) => setForm({ ...form, branch_id: v, product_id: "", quantity: "", selling_price: "" })}
+                    onValueChange={(v) =>
+                      setForm({
+                        ...form,
+                        branch_id: v,
+                        product_id: "",
+                        quantity: "",
+                        selling_price: "",
+                      })
+                    }
                   >
                     <SelectTrigger>
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      {branches.map((b: any) => (
-                        <SelectItem key={b.id} value={b.id}>{b.name}</SelectItem>
+                      {branches.map((b) => (
+                        <SelectItem key={b.id} value={b.id}>
+                          {b.name}
+                        </SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
@@ -261,15 +326,42 @@ function SalesPage() {
                 <Label>{t.customerName} *</Label>
                 <Input
                   value={customerName}
-                  onChange={(e) => setCustomerName(e.target.value)}
+                  onChange={(e) => {
+                    setCustomerName(e.target.value);
+                    setCustomerLookup(e.target.value);
+                  }}
+                  placeholder="Search existing customer or type a new one"
                 />
+                {customerLookup.trim() && matchingCustomers.length > 0 && (
+                  <div className="rounded-md border bg-muted/20 p-2 text-sm">
+                    <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                      Existing customers
+                    </p>
+                    <div className="space-y-1">
+                      {matchingCustomers.slice(0, 5).map((customer) => (
+                        <button
+                          key={customer.id}
+                          type="button"
+                          className="flex w-full items-center justify-between rounded-md border border-transparent px-2 py-1.5 text-left hover:border-border hover:bg-background"
+                          onClick={() => {
+                            setCustomerName(customer.name);
+                            setCustomerPhone(customer.phone ?? "");
+                            setCustomerLookup(customer.name);
+                          }}
+                        >
+                          <span>{customer.name}</span>
+                          <span className="text-xs text-muted-foreground">
+                            {customer.phone ?? "No phone"}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
               <div className="space-y-2">
                 <Label>{t.customerPhone}</Label>
-                <Input
-                  value={customerPhone}
-                  onChange={(e) => setCustomerPhone(e.target.value)}
-                />
+                <Input value={customerPhone} onChange={(e) => setCustomerPhone(e.target.value)} />
               </div>
 
               {/* Product selection */}
@@ -278,7 +370,7 @@ function SalesPage() {
                 <Select
                   value={form.product_id}
                   onValueChange={(v) => {
-                    const p: any = products.find((x: any) => x.id === v);
+                    const p = products.find((x) => x.id === v);
                     setForm({
                       ...form,
                       product_id: v,
@@ -290,20 +382,23 @@ function SalesPage() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {isOwner ? products.map((p: any) => (
-                      <SelectItem key={p.id} value={p.id}>
-                        {p.name} ({p.unit}) — {t.buyingPrice}: {money(p.buying_price)}
-                      </SelectItem>
-                    )) : products.map((p: any) => (
-                      <SelectItem key={p.id} value={p.id}>
-                        {p.name} ({p.unit})
-                      </SelectItem>
-                    ))}
+                    {isOwner
+                      ? products.map((p) => (
+                          <SelectItem key={p.id} value={p.id}>
+                            {p.name} ({p.unit}) — {t.buyingPrice}: {money(p.buying_price)}
+                          </SelectItem>
+                        ))
+                      : products.map((p) => (
+                          <SelectItem key={p.id} value={p.id}>
+                            {p.name} ({p.unit})
+                          </SelectItem>
+                        ))}
                   </SelectContent>
                 </Select>
                 {form.branch_id && form.product_id && (
                   <p className="text-xs text-muted-foreground">
-                    {t.currentStock}: <strong>{numberFmtSafe(stock?.quantity ?? 0)}</strong> {selectedProduct?.unit ?? ""}
+                    {t.currentStock}: <strong>{numberFmtSafe(stock?.quantity ?? 0)}</strong>{" "}
+                    {selectedProduct?.unit ?? ""}
                   </p>
                 )}
               </div>
@@ -325,9 +420,8 @@ function SalesPage() {
                   <Input
                     type="number"
                     min={0}
-                    value={selectedProduct ? (isOwner ? form.selling_price : catalogPrice.toString()) : ""}
-                    onChange={(e) => setForm({ ...form, selling_price: e.target.value })}
-                    readOnly={!isOwner}
+                    value={selectedProduct ? catalogPrice.toString() : ""}
+                    readOnly
                   />
                 </div>
               </div>
@@ -350,10 +444,19 @@ function SalesPage() {
                 <CardContent>
                   <div className="flex flex-wrap items-end justify-between gap-3 text-xl font-bold">
                     <span>{money(lineTotal)}</span>
-                    {isOwner && <span className="text-green-600">{money((unitPrice - Number(selectedProduct?.buying_price ?? 0)) * qty)}</span>}
+                    {isOwner && (
+                      <span className="text-green-600">
+                        {money((unitPrice - Number(selectedProduct?.buying_price ?? 0)) * qty)}
+                      </span>
+                    )}
                   </div>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    {isOwner ? localized("Inyungu ibarwa hakurikijwe igiciro cyashyizweho n'umuyobozi.", "Profit is calculated from the owner-set catalog price.") : "The total uses the approved selling price."}
+                    {isOwner
+                      ? localized(
+                          "Inyungu ibarwa hakurikijwe igiciro cyashyizweho n'umuyobozi.",
+                          "Profit is calculated from the owner-set catalog price.",
+                        )
+                      : "The total uses the approved selling price."}
                   </p>
                 </CardContent>
               </Card>
@@ -361,14 +464,22 @@ function SalesPage() {
               {/* Stock warning */}
               {qty > availableStock && (
                 <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
-                  {t.noStockEnough} — Hari {numberFmtSafe(availableStock)} {selectedProduct?.unit ?? ""} ariko wifuza {numberFmtSafe(qty)} {selectedProduct?.unit ?? ""}.
+                  {t.noStockEnough} — Hari {numberFmtSafe(availableStock)}{" "}
+                  {selectedProduct?.unit ?? ""} ariko wifuza {numberFmtSafe(qty)}{" "}
+                  {selectedProduct?.unit ?? ""}.
                 </div>
               )}
             </div>
 
             <DialogFooter className="gap-2 sm:gap-0">
-              <Button variant="outline" onClick={() => setOpen(false)} className="w-full sm:w-auto">{t.cancel}</Button>
-              <Button onClick={() => save.mutate()} disabled={save.isPending || !!canSave()} className="w-full sm:w-auto">
+              <Button variant="outline" onClick={() => setOpen(false)} className="w-full sm:w-auto">
+                {t.cancel}
+              </Button>
+              <Button
+                onClick={() => save.mutate()}
+                disabled={save.isPending || !!canSave()}
+                className="w-full sm:w-auto"
+              >
                 {save.isPending && <span className="mr-2 animate-spin">↻</span>}
                 EMEZA IGURISHA
               </Button>
@@ -380,10 +491,28 @@ function SalesPage() {
       <SetupBanner
         steps={[
           ...(branches.length === 0
-            ? [{ message: localized("Banza wongereho ishami mbere yo kwandika igurisha.", "Add a branch before recording sales."), to: "/branches", label: t.branches }]
+            ? [
+                {
+                  message: localized(
+                    "Banza wongereho ishami mbere yo kwandika igurisha.",
+                    "Add a branch before recording sales.",
+                  ),
+                  to: "/branches",
+                  label: t.branches,
+                },
+              ]
             : []),
           ...(products.length === 0
-            ? [{ message: localized("Banza wongereho igicuruzwa mbere yo kwandika igurisha.", "Add a product before recording sales."), to: "/products", label: t.products }]
+            ? [
+                {
+                  message: localized(
+                    "Banza wongereho igicuruzwa mbere yo kwandika igurisha.",
+                    "Add a product before recording sales.",
+                  ),
+                  to: "/products",
+                  label: t.products,
+                },
+              ]
             : []),
         ]}
       />
@@ -407,18 +536,29 @@ function SalesPage() {
             <TableBody>
               {sales.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={isOwner ? 8 : 6} className="py-10 text-center text-muted-foreground">{t.noData}</TableCell>
+                  <TableCell
+                    colSpan={isOwner ? 8 : 6}
+                    className="py-10 text-center text-muted-foreground"
+                  >
+                    {t.noData}
+                  </TableCell>
                 </TableRow>
               ) : (
-                sales.map((s: any) => (
+                sales.map((s) => (
                   <TableRow key={s.id}>
                     <TableCell>{fmtDate(s.sale_date)}</TableCell>
                     <TableCell className="font-medium">{s.products?.name}</TableCell>
                     <TableCell>{s.customer_name ?? "—"}</TableCell>
-                    <TableCell>{s.quantity} {s.products?.unit}</TableCell>
+                    <TableCell>
+                      {s.quantity} {s.products?.unit}
+                    </TableCell>
                     <TableCell>{money(s.selling_price)}</TableCell>
                     <TableCell>{money(Number(s.selling_price) * Number(s.quantity))}</TableCell>
-                    {isOwner && <TableCell className="font-semibold text-green-600">+{money(s.profit)}</TableCell>}
+                    {isOwner && (
+                      <TableCell className="font-semibold text-green-600">
+                        +{money(s.profit)}
+                      </TableCell>
+                    )}
                     {isOwner && <TableCell>{s.branches?.name}</TableCell>}
                   </TableRow>
                 ))

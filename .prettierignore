@@ -2,6 +2,11 @@ node_modules
 dist
 .output
 .vinxi
+.vercel
+.tanstack
+.eslint-audit.json
+.env
+.env.*
 pnpm-lock.yaml
 package-lock.json
 bun.lock

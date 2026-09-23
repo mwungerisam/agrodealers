@@ -1,29 +1,22 @@
-# Welcome to your Lovable project
+# UFBC Agrodealer
 
-This project was built with [Lovable](https://lovable.dev).
+Inventory, purchases, sales, customers, branch management and reporting for one
+agricultural business with multiple branches. Built with React, TanStack Start,
+TypeScript, Tailwind CSS and Supabase.
 
-## Build with Lovable
-
-Open your project in the [Lovable editor](https://lovable.dev) and keep building.
-
-- **Ship faster**: describe what you want to build and Lovable handles the code.
-- **Stay in sync**: connect the project to GitHub and every change made in Lovable is committed straight to your repository.
-- **Full ownership**: this code is yours. Push to your repository and your changes sync back into Lovable, ready for your next prompt.
-
-## Development
-
-Prefer working locally? You need Node.js and npm — [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating).
+Start with [Project setup and verification](PROJECT_SETUP.md), then follow
+[Vercel deployment](VERCEL_DEPLOYMENT.md) when publishing.
 
 ```sh
-git clone <this-repository-url>
-cd <repository-name>
-npm i
+npm ci
+npm run check:env
 npm run dev
 ```
 
-## Built with
+For a new checkout, copy `.env.example` to `.env` and configure the project URL and
+public key first. Do not overwrite an existing `.env`. On Windows PowerShell,
+use `npm.cmd` if script execution policy blocks `npm`.
 
-- TanStack Start
-- TypeScript
-- React
-- Tailwind CSS
+Run `npm run check` for TypeScript, lint and isolated PostgreSQL tests. Run
+`npm run build` for the production bundle. Business rules and permissions live
+in the versioned SQL migrations; local tests do not modify the hosted database.

@@ -2,12 +2,14 @@ import { createContext, useContext, useEffect, useRef, useState, type ReactNode 
 import type { Session, User } from "@supabase/supabase-js";
 import { supabase } from "@/integrations/supabase/client";
 import type { Database } from "@/integrations/supabase/types";
+import { useQueryClient } from "@tanstack/react-query";
 
 export type AppRole = Database["public"]["Enums"]["app_role"];
 
 export interface UserRoleInfo {
   role: AppRole | null;
   branch_id: string | null;
+  is_primary_owner?: boolean;
 }
 
 interface AuthCtx {
@@ -23,28 +25,34 @@ interface AuthCtx {
 const Ctx = createContext<AuthCtx | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
+  const queryClient = useQueryClient();
   const [user, setUser] = useState<User | null>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [role, setRole] = useState<UserRoleInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [unavailable, setUnavailable] = useState(false);
   const lastKnownSessionRef = useRef<Session | null>(null);
+  const roleRequestRef = useRef(0);
 
   const loadRole = async (uid: string) => {
+    const requestId = ++roleRequestRef.current;
     try {
-      let record: { role: AppRole; branch_id: string | null } | null = null;
+      let record: { role: AppRole; branch_id: string | null; is_primary_owner: boolean } | null =
+        null;
 
       const { data, error } = await supabase
         .from("user_roles")
-        .select("role, branch_id")
+        .select("role, branch_id, is_primary_owner")
         .eq("user_id", uid)
-        .limit(1);
+        .limit(1)
+        .abortSignal(AbortSignal.timeout(10_000));
 
       if (error && error.code !== "PGRST116") {
         throw error;
       }
 
       record = data?.[0] ?? null;
+      if (requestId !== roleRequestRef.current) return;
 
       if (!record) {
         setRole(null);
@@ -52,11 +60,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      setRole(
-        { role: record.role as AppRole, branch_id: record.branch_id },
-      );
+      setRole({
+        role: record.role,
+        branch_id: record.branch_id,
+        is_primary_owner: record.is_primary_owner,
+      });
       setUnavailable(false);
     } catch {
+      if (requestId !== roleRequestRef.current) return;
       setRole({ role: null, branch_id: null });
       setUnavailable(true);
     }
@@ -64,6 +75,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let active = true;
+    let sessionVersion = 0;
+    let roleTimer: number | undefined;
     const startupTimeout = window.setTimeout(() => {
       if (!active) return;
       setUnavailable(true);
@@ -72,77 +85,61 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const applySession = (nextSession: Session | null) => {
       if (!active) return;
+      const version = ++sessionVersion;
+      window.clearTimeout(roleTimer);
 
       if (!nextSession?.user) {
-        if (lastKnownSessionRef.current?.user) {
-          return;
-        }
-
+        roleRequestRef.current += 1;
+        queryClient.clear();
         lastKnownSessionRef.current = null;
         setSession(null);
         setUser(null);
         setRole(null);
+        setUnavailable(false);
         setLoading(false);
+        window.clearTimeout(startupTimeout);
         return;
       }
 
+      const userChanged = lastKnownSessionRef.current?.user.id !== nextSession.user.id;
+      if (userChanged) {
+        roleRequestRef.current += 1;
+        queryClient.clear();
+        setRole(null);
+        setLoading(true);
+      }
       lastKnownSessionRef.current = nextSession;
       setSession(nextSession);
       setUser(nextSession.user);
-      setUnavailable(false);
-      setLoading(true);
-
-      void loadRole(nextSession.user.id).finally(() => {
-        if (active) setLoading(false);
-      });
+      // Run outside the auth callback's session lock. Same-user refreshes keep
+      // the mounted workspace intact while its permissions are revalidated.
+      roleTimer = window.setTimeout(() => {
+        void loadRole(nextSession.user.id).finally(() => {
+          if (active && version === sessionVersion) {
+            window.clearTimeout(startupTimeout);
+            setLoading(false);
+          }
+        });
+      }, 0);
     };
 
     const { data: sub } = supabase.auth.onAuthStateChange((event, s) => {
       if (!active) return;
 
-      if (event === "SIGNED_OUT") {
-        lastKnownSessionRef.current = null;
-        setSession(null);
-        setUser(null);
-        setRole(null);
-        setLoading(false);
-        return;
-      }
-
-      if (!s?.user) {
-        lastKnownSessionRef.current = null;
-        setSession(null);
-        setUser(null);
-        setRole(null);
-        setLoading(false);
-        return;
-      }
-
-      applySession(s);
+      applySession(event === "SIGNED_OUT" ? null : s);
     });
 
-    supabase.auth
-      .getSession()
-      .then(({ data }) => {
-        if (!active) return;
-        applySession(data.session);
-      })
-      .catch(() => {
-        if (!active) return;
-        setUnavailable(true);
-        setSession(null);
-        setUser(null);
-        setRole(null);
-        setLoading(false);
-      })
-      .finally(() => window.clearTimeout(startupTimeout));
+    // onAuthStateChange emits INITIAL_SESSION after reading stored credentials;
+    // a separate getSession() would duplicate the same startup role request.
 
     return () => {
       active = false;
+      roleRequestRef.current += 1;
+      window.clearTimeout(roleTimer);
       window.clearTimeout(startupTimeout);
       sub.subscription.unsubscribe();
     };
-  }, []);
+  }, [queryClient]);
 
   return (
     <Ctx.Provider

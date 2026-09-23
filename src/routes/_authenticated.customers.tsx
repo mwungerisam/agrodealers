@@ -1,3 +1,4 @@
+import { QueryState } from "@/components/query-state";
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -6,9 +7,29 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "@/components/ui/dialog";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+  DialogFooter,
+} from "@/components/ui/dialog";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Plus, Pencil, Trash2, Search, UserCheck } from "lucide-react";
 import { toast } from "sonner";
 import { t, formatErrorMessage } from "@/lib/i18n";
@@ -46,13 +67,22 @@ function CustomersPage() {
   const { data: branches = [] } = useQuery({
     queryKey: ["branches-active"],
     queryFn: async () => {
-      const { data, error } = await supabase.from("branches").select("id, name").eq("status", true).order("name");
+      const { data, error } = await supabase
+        .from("branches")
+        .select("id, name")
+        .eq("status", true)
+        .order("name");
       if (error) throw error;
       return data ?? [];
     },
   });
 
-  const { data: customers = [] } = useQuery({
+  const {
+    data: customers = [],
+    isPending: pagePending,
+    error: pageError,
+    refetch: retryPage,
+  } = useQuery({
     queryKey: ["customers"],
     staleTime: 60_000,
     queryFn: async () => {
@@ -77,9 +107,12 @@ function CustomersPage() {
           .eq("id", editing.id);
         if (error) throw error;
       } else {
-        const { error } = await supabase
-          .from("customers")
-          .insert({ name: form.name.trim(), phone: form.phone.trim() || null, branch_id: branchId, created_by: user?.id ?? null });
+        const { error } = await supabase.from("customers").insert({
+          name: form.name.trim(),
+          phone: form.phone.trim() || null,
+          branch_id: branchId,
+          created_by: user?.id ?? null,
+        });
         if (error) throw error;
       }
     },
@@ -89,7 +122,7 @@ function CustomersPage() {
       qc.invalidateQueries({ queryKey: ["branches-active"] });
       setOpen(false);
       setEditing(null);
-      setForm({ branch_id: isOwner ? "" : workerBranchId ?? "", name: "", phone: "" });
+      setForm({ branch_id: isOwner ? "" : (workerBranchId ?? ""), name: "", phone: "" });
     },
     onError: (e: Error) => toast.error(formatErrorMessage(e)),
   });
@@ -107,14 +140,14 @@ function CustomersPage() {
   });
 
   const filtered = customers.filter(
-    (c: any) =>
+    (c) =>
       c.name?.toLowerCase().includes(search.toLowerCase()) ||
       (c.phone?.toLowerCase() ?? "").includes(search.toLowerCase()),
   );
 
   const openNew = () => {
     setEditing(null);
-    setForm({ branch_id: isOwner ? "" : workerBranchId ?? "", name: "", phone: "" });
+    setForm({ branch_id: isOwner ? "" : (workerBranchId ?? ""), name: "", phone: "" });
     setOpen(true);
   };
   const openEdit = (c: Customer) => {
@@ -123,12 +156,17 @@ function CustomersPage() {
     setOpen(true);
   };
 
+  if (pagePending || pageError)
+    return <QueryState pending={pagePending} error={pageError} retry={() => void retryPage()} />;
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-extrabold tracking-tight sm:text-3xl">{t.customers}</h1>
-          <p className="text-sm text-muted-foreground">Kugabanya n'guhindura abakiriya babarakora</p>
+          <p className="text-sm text-muted-foreground">
+            Kugabanya n'guhindura abakiriya babarakora
+          </p>
         </div>
         <Dialog open={open} onOpenChange={setOpen}>
           <DialogTrigger asChild>
@@ -138,23 +176,32 @@ function CustomersPage() {
           </DialogTrigger>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>{editing ? t.edit : t.add} {t.customer}</DialogTitle>
+              <DialogTitle>
+                {editing ? t.edit : t.add} {t.customer}
+              </DialogTitle>
             </DialogHeader>
             <div className="space-y-4">
               <div className="space-y-2">
-                {isOwner && <><Label>{t.branch} *</Label><Select
-                  value={form.branch_id}
-                  onValueChange={(v) => setForm({ ...form, branch_id: v })}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {branches.map((b: any) => (
-                      <SelectItem key={b.id} value={b.id}>{b.name}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select></>}
+                {isOwner && (
+                  <>
+                    <Label>{t.branch} *</Label>
+                    <Select
+                      value={form.branch_id}
+                      onValueChange={(v) => setForm({ ...form, branch_id: v })}
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {branches.map((b) => (
+                          <SelectItem key={b.id} value={b.id}>
+                            {b.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </>
+                )}
               </div>
               <div className="space-y-2">
                 <Label>{t.customerName} *</Label>
@@ -172,8 +219,12 @@ function CustomersPage() {
               </div>
             </div>
             <DialogFooter>
-              <Button variant="outline" onClick={() => setOpen(false)}>{t.cancel}</Button>
-              <Button onClick={() => save.mutate()} disabled={save.isPending}>{t.save}</Button>
+              <Button variant="outline" onClick={() => setOpen(false)}>
+                {t.cancel}
+              </Button>
+              <Button onClick={() => save.mutate()} disabled={save.isPending}>
+                {t.save}
+              </Button>
             </DialogFooter>
           </DialogContent>
         </Dialog>
@@ -183,11 +234,7 @@ function CustomersPage() {
         <CardHeader>
           <div className="relative max-w-sm">
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="pl-9"
-            />
+            <Input value={search} onChange={(e) => setSearch(e.target.value)} className="pl-9" />
           </div>
         </CardHeader>
         <CardContent>
@@ -204,31 +251,40 @@ function CustomersPage() {
               {filtered.length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={4} className="py-10 text-center text-muted-foreground">
-                    {branches.length === 0 ? "Banza wongereho ishami muri Amashami mbere yo guhindura abakiriya." : t.noData}
+                    {branches.length === 0
+                      ? "Banza wongereho ishami muri Amashami mbere yo guhindura abakiriya."
+                      : t.noData}
                   </TableCell>
                 </TableRow>
               ) : (
-                filtered.map((c: any) => (
+                filtered.map((c) => (
                   <TableRow key={c.id}>
                     <TableCell className="font-medium">{c.name}</TableCell>
                     <TableCell>{c.phone ?? "—"}</TableCell>
                     <TableCell>{c.branches?.name ?? "—"}</TableCell>
                     <TableCell className="text-right">
-                      {isOwner && <>
-                        <Button size="icon" variant="ghost" onClick={() => openEdit(c)} aria-label={t.edit}>
-                          <Pencil className="h-4 w-4" />
-                        </Button>
-                        <Button
-                          size="icon"
-                          variant="ghost"
-                          onClick={() => {
-                            if (confirm(t.confirmDelete)) del.mutate(c.id);
-                          }}
-                          aria-label={t.delete}
-                        >
-                          <Trash2 className="h-4 w-4 text-destructive" />
-                        </Button>
-                      </>}
+                      {isOwner && (
+                        <>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            onClick={() => openEdit(c)}
+                            aria-label={t.edit}
+                          >
+                            <Pencil className="h-4 w-4" />
+                          </Button>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            onClick={() => {
+                              if (confirm(t.confirmDelete)) del.mutate(c.id);
+                            }}
+                            aria-label={t.delete}
+                          >
+                            <Trash2 className="h-4 w-4 text-destructive" />
+                          </Button>
+                        </>
+                      )}
                     </TableCell>
                   </TableRow>
                 ))

@@ -41,7 +41,9 @@ function AuthenticatedLayout() {
             <Loader2 className="relative h-7 w-7 animate-spin text-white" />
           </div>
           <div className="text-center">
-            <p className="text-[10px] font-semibold uppercase tracking-[0.28em] text-emerald-700/90">UFBC AGRODEALER</p>
+            <p className="text-[10px] font-semibold uppercase tracking-[0.28em] text-emerald-700/90">
+              UFBC AGRODEALER
+            </p>
             <h2 className="mt-2 text-lg font-semibold text-slate-900">Loading your dashboard</h2>
             <p className="mt-1 text-sm text-slate-500">Syncing your secure workspace…</p>
           </div>
@@ -59,7 +61,9 @@ function AuthenticatedLayout() {
             We could not verify your access right now. Check your connection and try again.
           </p>
           <div className="mt-6 flex justify-center gap-2">
-            <Button variant="outline" onClick={() => void refreshRole()}>Try again</Button>
+            <Button variant="outline" onClick={() => void refreshRole()}>
+              Try again
+            </Button>
             <Button onClick={() => void signOut()}>{t.signOut}</Button>
           </div>
         </div>
@@ -122,7 +126,7 @@ function AuthenticatedLayout() {
                 <Link
                   key={item.to}
                   to={item.to}
-                    aria-current={active ? "page" : undefined}
+                  aria-current={active ? "page" : undefined}
                   className={`group flex min-h-10 items-center gap-3 rounded-xl px-3 text-sm font-medium transition-all ${
                     active
                       ? "bg-sidebar-primary text-sidebar-primary-foreground shadow-sm"
@@ -171,10 +175,18 @@ function AuthenticatedLayout() {
           </div>
           <div className="min-w-0">
             <p className="truncate text-xs font-extrabold">UFBC AGRODEALER</p>
-            <p className="truncate text-[9px] text-sidebar-foreground/55">{current?.label ?? t.dashboard}</p>
+            <p className="truncate text-[9px] text-sidebar-foreground/55">
+              {current?.label ?? t.dashboard}
+            </p>
           </div>
         </div>
-        <Button variant="ghost" size="icon" onClick={handleSignOut} className="text-sidebar-foreground" aria-label={t.signOut}>
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={handleSignOut}
+          className="text-sidebar-foreground"
+          aria-label={t.signOut}
+        >
           <LogOut className="h-4 w-4" />
         </Button>
       </div>
@@ -186,13 +198,17 @@ function AuthenticatedLayout() {
             <div className="mt-0.5 flex items-center gap-1.5">
               <span className="text-sm text-muted-foreground">Workspace</span>
               <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/50" />
-              <span className="text-sm font-semibold text-foreground">{current?.label ?? t.dashboard}</span>
+              <span className="text-sm font-semibold text-foreground">
+                {current?.label ?? t.dashboard}
+              </span>
             </div>
           </div>
           <div className="flex items-center gap-3">
             <div className="hidden text-right lg:block">
               <p className="text-xs font-semibold">{isOwner ? t.owner : t.worker}</p>
-              <p className="max-w-[240px] truncate text-[11px] text-muted-foreground">{user.email}</p>
+              <p className="max-w-[240px] truncate text-[11px] text-muted-foreground">
+                {user.email}
+              </p>
             </div>
             <div className="flex h-9 w-9 items-center justify-center rounded-full border bg-muted text-xs font-bold">
               {(user.email?.[0] ?? "U").toUpperCase()}
@@ -201,7 +217,10 @@ function AuthenticatedLayout() {
         </header>
 
         <div className="h-14 md:hidden" />
-        <nav aria-label="Primary navigation" className="scrollbar-none sticky top-14 z-30 flex overflow-x-auto border-b bg-background/95 px-2 backdrop-blur md:hidden">
+        <nav
+          aria-label="Primary navigation"
+          className="scrollbar-none sticky top-14 z-30 flex overflow-x-auto border-b bg-background/95 px-2 backdrop-blur md:hidden"
+        >
           {nav.map((item) => {
             const active = pathname === item.to || pathname.startsWith(item.to + "/");
             return (
@@ -210,7 +229,9 @@ function AuthenticatedLayout() {
                 to={item.to}
                 aria-current={active ? "page" : undefined}
                 className={`flex min-h-11 shrink-0 items-center gap-1.5 whitespace-nowrap border-b-2 px-3 text-xs font-semibold transition-colors ${
-                  active ? "border-primary text-primary" : "border-transparent text-muted-foreground"
+                  active
+                    ? "border-primary text-primary"
+                    : "border-transparent text-muted-foreground"
                 }`}
               >
                 <item.icon className="h-3.5 w-3.5" />

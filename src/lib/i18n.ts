@@ -297,7 +297,8 @@ const en: Partial<typeof rw> = {
   emailNotConfirmed: "Confirm your email using the link we sent before signing in.",
   rateLimitExceeded:
     "Too many requests were made in a short time. Please wait before trying again.",
-  passwordHint: "Use at least 12 characters, including upper- and lower-case letters, a number, and a symbol.",
+  passwordHint:
+    "Use at least 12 characters, including upper- and lower-case letters, a number, and a symbol.",
   dashboard: "Overview",
   branches: "Branches",
   products: "Products",
@@ -544,9 +545,12 @@ export function money(n: number | string | null | undefined) {
 export function fmtDate(d: string | Date | null | undefined) {
   if (!d) return "";
   // PostgreSQL DATE values are calendar dates, not UTC instants.
-  const date = typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d)
-    ? new Date(`${d}T00:00:00`)
-    : typeof d === "string" ? new Date(d) : d;
+  const date =
+    typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d)
+      ? new Date(`${d}T00:00:00`)
+      : typeof d === "string"
+        ? new Date(d)
+        : d;
   return date.toLocaleDateString("en-GB");
 }
 
@@ -581,12 +585,17 @@ export function formatErrorMessage(err: unknown): string {
 
   if (
     lower.includes("failed to send a request to the edge function") ||
-    lower.includes("functionsfetcherror") ||
-    lower.includes("function not found")
+    lower.includes("functionsfetcherror")
   ) {
     return localized(
-      "Serivisi yo kongeramo umukozi ntirashyirwa kuri Supabase. Banza wohereze Edge Function ya create-worker.",
-      "The worker-invitation service is not deployed to Supabase. Deploy the create-worker Edge Function first.",
+      "Serivisi yo kongeramo umukozi ntiboneka. Reba ko Edge Function ya create-worker yashyizwe kuri Supabase kandi ko aderesi y'urubuga yemerewe.",
+      "The worker service is unavailable. Confirm that create-worker is deployed and this website origin is allowed.",
+    );
+  }
+  if (lower.includes("function not found")) {
+    return localized(
+      "Serivisi yo kongeramo umukozi ntirashyirwa kuri Supabase.",
+      "The worker-invitation service is not deployed to Supabase.",
     );
   }
 

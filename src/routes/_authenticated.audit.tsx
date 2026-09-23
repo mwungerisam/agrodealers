@@ -13,6 +13,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { t, fmtDateTime, numberFmt } from "@/lib/i18n";
 import { useIsOwner } from "@/lib/auth-context";
+import { QueryState } from "@/components/query-state";
 
 export const Route = createFileRoute("/_authenticated/audit")({
   component: AuditPage,
@@ -20,9 +21,13 @@ export const Route = createFileRoute("/_authenticated/audit")({
 
 function AuditPage() {
   const isOwner = useIsOwner();
-  if (!isOwner) return <Navigate to="/dashboard" replace />;
 
-  const { data: logs = [] } = useQuery({
+  const {
+    data: logs = [],
+    error: logsError,
+    isPending,
+    refetch,
+  } = useQuery({
     queryKey: ["audit-log"],
     staleTime: 60_000,
     queryFn: async () => {
@@ -35,8 +40,12 @@ function AuditPage() {
         .limit(500);
       if (error) throw error;
 
-      const userIds = [...new Set((data ?? []).map((log) => log.user_id).filter(Boolean))];
-      if (userIds.length === 0) return data ?? [];
+      const userIds = [
+        ...new Set(
+          (data ?? []).map((log) => log.user_id).filter((id): id is string => id !== null),
+        ),
+      ];
+      if (userIds.length === 0) return (data ?? []).map((log) => ({ ...log, profile_name: null }));
 
       const { data: profiles, error: profilesError } = await supabase
         .from("profiles")
@@ -47,10 +56,14 @@ function AuditPage() {
       const names = new Map((profiles ?? []).map((profile) => [profile.id, profile.full_name]));
       return (data ?? []).map((log) => ({
         ...log,
-        profile_name: log.user_id ? names.get(log.user_id) ?? null : null,
+        profile_name: log.user_id ? (names.get(log.user_id) ?? null) : null,
       }));
     },
   });
+
+  if (!isOwner) return <Navigate to="/dashboard" replace />;
+  if (isPending || logsError)
+    return <QueryState pending={isPending} error={logsError} retry={() => void refetch()} />;
 
   return (
     <div className="space-y-6">
@@ -93,9 +106,7 @@ function AuditPage() {
                       </TableCell>
                       <TableCell className="font-medium">{log.entity}</TableCell>
                       <TableCell>{log.branches?.name ?? "—"}</TableCell>
-                      <TableCell>
-                        {log.profile_name ?? log.user_id?.slice(0, 8) ?? "—"}
-                      </TableCell>
+                      <TableCell>{log.profile_name ?? log.user_id?.slice(0, 8) ?? "—"}</TableCell>
                     </TableRow>
                   ))
                 )}

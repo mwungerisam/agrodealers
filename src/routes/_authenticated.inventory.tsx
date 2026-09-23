@@ -3,7 +3,14 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -18,6 +25,7 @@ import { toast } from "sonner";
 import { t, money, numberFmt, formatErrorMessage, localized } from "@/lib/i18n";
 import { useIsOwner, useBranchId } from "@/lib/auth-context";
 import { StockBadge } from "@/lib/stock-badge";
+import { QueryState } from "@/components/query-state";
 
 export const Route = createFileRoute("/_authenticated/inventory")({
   component: InventoryPage,
@@ -27,8 +35,6 @@ function InventoryPage() {
   const isOwner = useIsOwner();
   const branchId = useBranchId();
   const qc = useQueryClient();
-
-  if (!isOwner) return <Navigate to="/dashboard" replace />;
 
   const [adjustOpen, setAdjustOpen] = useState(false);
   const [adjustingItem, setAdjustingItem] = useState<{
@@ -41,41 +47,48 @@ function InventoryPage() {
   const [newQty, setNewQty] = useState("");
   const [adjustReason, setAdjustReason] = useState("");
 
-  const { data: inventory = [] } = useQuery({
+  const {
+    data: inventory = [],
+    error: inventoryError,
+    isPending,
+    refetch,
+  } = useQuery({
     queryKey: ["inventory-list", branchId, isOwner],
     staleTime: 60_000,
     queryFn: async () => {
-      let q = supabase.from("inventory").select(
-        "quantity, avg_cost, product_id, branch_id, products(name, unit, category, min_stock), branches(name, code)",
-      );
+      let q = supabase
+        .from("inventory")
+        .select(
+          "quantity, avg_cost, product_id, branch_id, products(name, unit, category, min_stock), branches(name, code)",
+        );
       if (!isOwner && branchId) q = q.eq("branch_id", branchId);
-      const { data } = await q;
+      const { data, error } = await q;
+      if (error) throw error;
       return data ?? [];
     },
   });
 
   const totalItems = inventory.length;
   const totalValue = inventory.reduce(
-    (s: number, i: any) => s + Number(i.quantity) * Number(i.avg_cost ?? 0),
+    (s, i) => s + Number(i.quantity) * Number(i.avg_cost ?? 0),
     0,
   );
   const lowCount = inventory.filter(
-    (i: any) =>
-      Number(i.quantity) > 0 &&
-      Number(i.quantity) <= Number(i.products?.min_stock ?? 0),
+    (i) => Number(i.quantity) > 0 && Number(i.quantity) <= Number(i.products?.min_stock ?? 0),
   ).length;
-  const outCount = inventory.filter((i: any) => Number(i.quantity) <= 0).length;
+  const outCount = inventory.filter((i) => Number(i.quantity) <= 0).length;
 
   const adjustStock = useMutation({
     mutationFn: async () => {
       if (!adjustingItem) throw new Error(t.requiredField);
       const qty = Number(newQty);
-      if (qty < 0) throw new Error("Ingano ntishobora kuba munsi ya zero");
-      const { error } = await (supabase.rpc as any)("adjust_stock", {
+      if (!Number.isFinite(qty) || qty < 0)
+        throw new Error("Enter a valid quantity of zero or more.");
+      const { error } = await supabase.rpc("adjust_stock", {
         p_branch_id: adjustingItem.branch_id,
         p_product_id: adjustingItem.product_id,
         p_new_quantity: qty,
-        p_reason: adjustReason || null,
+        p_reason: adjustReason.trim(),
       });
       if (error) throw error;
     },
@@ -94,7 +107,7 @@ function InventoryPage() {
     },
   });
 
-  const openAdjust = (item: any) => {
+  const openAdjust = (item: (typeof inventory)[number]) => {
     setAdjustingItem({
       branch_id: item.branch_id,
       product_id: item.product_id,
@@ -107,14 +120,24 @@ function InventoryPage() {
     setAdjustOpen(true);
   };
 
+  if (!isOwner) return <Navigate to="/dashboard" replace />;
+  if (isPending || inventoryError)
+    return <QueryState pending={isPending} error={inventoryError} retry={() => void refetch()} />;
+
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-extrabold tracking-tight sm:text-3xl">{t.inventory}</h1>
         <p className="text-sm text-muted-foreground">
           {isOwner
-            ? localized("Reba ububiko bwose n'imiterere yabwo muri buri shami.", "Review all inventory and its status in every branch.")
-            : localized("Reba ububiko bw'ishami waherewemo.", "Review inventory assigned to your branch.")}
+            ? localized(
+                "Reba ububiko bwose n'imiterere yabwo muri buri shami.",
+                "Review all inventory and its status in every branch.",
+              )
+            : localized(
+                "Reba ububiko bw'ishami waherewemo.",
+                "Review inventory assigned to your branch.",
+              )}
         </p>
       </div>
 
@@ -154,12 +177,20 @@ function InventoryPage() {
           </DialogHeader>
           <div className="space-y-4">
             <div className="rounded-md bg-muted/30 p-3 text-sm">
-              <p><strong>{t.product}:</strong> {adjustingItem?.product_name}</p>
-              <p><strong>{t.branch}:</strong> {adjustingItem?.branch_name}</p>
-              <p><strong>{t.currentStock}:</strong> {numberFmt(adjustingItem?.current_qty ?? 0)}</p>
+              <p>
+                <strong>{t.product}:</strong> {adjustingItem?.product_name}
+              </p>
+              <p>
+                <strong>{t.branch}:</strong> {adjustingItem?.branch_name}
+              </p>
+              <p>
+                <strong>{t.currentStock}:</strong> {numberFmt(adjustingItem?.current_qty ?? 0)}
+              </p>
             </div>
             <div className="space-y-2">
-              <Label>{t.quantity} {t.new} *</Label>
+              <Label>
+                {t.quantity} {t.new} *
+              </Label>
               <Input
                 type="number"
                 min={0}
@@ -169,29 +200,36 @@ function InventoryPage() {
               />
               {Number(newQty) > (adjustingItem?.current_qty ?? 0) && (
                 <p className="text-xs text-green-600">
-                  {localized("Andika impamvu yo guhindura ububiko", "Enter the reason for this inventory adjustment")}
+                  {localized(
+                    "Andika impamvu yo guhindura ububiko",
+                    "Enter the reason for this inventory adjustment",
+                  )}
                 </p>
               )}
               {Number(newQty) < (adjustingItem?.current_qty ?? 0) && (
                 <p className="text-xs text-orange-600">
-                  {localized("Sobanura impamvu, urugero: ibyangiritse cyangwa ibarura rishya", "Explain the reason, for example damaged goods or a new stock count")}
+                  {localized(
+                    "Sobanura impamvu, urugero: ibyangiritse cyangwa ibarura rishya",
+                    "Explain the reason, for example damaged goods or a new stock count",
+                  )}
                 </p>
               )}
             </div>
             <div className="space-y-2">
               <Label>Ingingo *</Label>
-              <Input
-                value={adjustReason}
-                onChange={(e) => setAdjustReason(e.target.value)}
-              />
+              <Input value={adjustReason} onChange={(e) => setAdjustReason(e.target.value)} />
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setAdjustOpen(false)}>{t.cancel}</Button>
+            <Button variant="outline" onClick={() => setAdjustOpen(false)}>
+              {t.cancel}
+            </Button>
             <Button
               onClick={() => adjustStock.mutate()}
               disabled={adjustStock.isPending || !adjustReason.trim() || !newQty}
-              variant={Number(newQty) < (adjustingItem?.current_qty ?? 0) ? "destructive" : "default"}
+              variant={
+                Number(newQty) < (adjustingItem?.current_qty ?? 0) ? "destructive" : "default"
+              }
             >
               {adjustStock.isPending && <span className="mr-2 animate-spin">↻</span>}
               {t.save}
@@ -224,23 +262,30 @@ function InventoryPage() {
               <TableBody>
                 {inventory.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={isOwner ? 9 : 8} className="py-10 text-center text-muted-foreground">
+                    <TableCell
+                      colSpan={isOwner ? 9 : 8}
+                      className="py-10 text-center text-muted-foreground"
+                    >
                       {t.noStock}
                     </TableCell>
                   </TableRow>
                 ) : (
-                  inventory.map((i: any) => {
+                  inventory.map((i) => {
                     const qty = Number(i.quantity);
                     const min = Number(i.products?.min_stock ?? 0);
                     const value = qty * Number(i.avg_cost);
                     return (
                       <TableRow key={`${i.branch_id}-${i.product_id}`}>
                         <TableCell className="font-medium">{i.products?.name}</TableCell>
-                        <TableCell><span className="capitalize">{i.products?.category ?? "—"}</span></TableCell>
+                        <TableCell>
+                          <span className="capitalize">{i.products?.category ?? "—"}</span>
+                        </TableCell>
                         <TableCell>
                           {isOwner ? i.branches?.name : "—"}
                           {isOwner && i.branches?.code && (
-                            <span className="ml-1 text-xs text-muted-foreground">({i.branches.code})</span>
+                            <span className="ml-1 text-xs text-muted-foreground">
+                              ({i.branches.code})
+                            </span>
                           )}
                         </TableCell>
                         <TableCell className="text-right">{numberFmt(qty)}</TableCell>
@@ -252,11 +297,7 @@ function InventoryPage() {
                         </TableCell>
                         {isOwner && (
                           <TableCell className="text-right">
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              onClick={() => openAdjust(i)}
-                            >
+                            <Button size="sm" variant="outline" onClick={() => openAdjust(i)}>
                               {t.stockAdjustment}
                             </Button>
                           </TableCell>

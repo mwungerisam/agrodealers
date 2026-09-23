@@ -13,7 +13,9 @@ type OwnerEveningReminderProps = {
 };
 
 export function OwnerEveningReminder({ salesValue, salesCount }: OwnerEveningReminderProps) {
-  const [permission, setPermission] = useState<NotificationPermission | "unsupported">("unsupported");
+  const [permission, setPermission] = useState<NotificationPermission | "unsupported">(
+    "unsupported",
+  );
 
   useEffect(() => {
     if ("Notification" in window) setPermission(Notification.permission);
@@ -29,17 +31,20 @@ export function OwnerEveningReminder({ salesValue, salesCount }: OwnerEveningRem
       target.setHours(REMINDER_HOUR, 0, 0, 0);
       if (target <= now) target.setDate(target.getDate() + 1);
 
-      timer = window.setTimeout(() => {
-        const date = localDateInput();
-        if (!localStorage.getItem(notificationKey(date))) {
-          new Notification("UFBC Agrodealer — Daily owner summary", {
-            body: `${salesCount} sale${salesCount === 1 ? "" : "s"} recorded today. Sales value: ${salesValue}.`,
-            icon: "/icon-192.png",
-          });
-          localStorage.setItem(notificationKey(date), "sent");
-        }
-        schedule();
-      }, Math.max(target.getTime() - Date.now(), 1_000));
+      timer = window.setTimeout(
+        () => {
+          const date = localDateInput();
+          if (!localStorage.getItem(notificationKey(date))) {
+            new Notification("UFBC Agrodealer — Daily owner summary", {
+              body: `${salesCount} sale${salesCount === 1 ? "" : "s"} recorded today. Sales value: ${salesValue}.`,
+              icon: "/icon-192.png",
+            });
+            localStorage.setItem(notificationKey(date), "sent");
+          }
+          schedule();
+        },
+        Math.max(target.getTime() - Date.now(), 1_000),
+      );
     };
 
     schedule();

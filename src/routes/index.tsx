@@ -17,7 +17,9 @@ function Index() {
             <Loader2 className="relative h-7 w-7 animate-spin text-white" />
           </div>
           <div className="text-center">
-            <p className="text-[10px] font-semibold uppercase tracking-[0.28em] text-emerald-700/90">UFBC AGRODEALER</p>
+            <p className="text-[10px] font-semibold uppercase tracking-[0.28em] text-emerald-700/90">
+              UFBC AGRODEALER
+            </p>
             <h2 className="mt-2 text-lg font-semibold text-slate-900">Starting securely</h2>
             <p className="mt-1 text-sm text-slate-500">Checking your access…</p>
           </div>
